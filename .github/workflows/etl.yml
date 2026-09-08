@@ -1,0 +1,214 @@
+name: ETL
+
+on:
+  schedule:
+    # GitHub cron is UTC. These windows cover the full NYSE/Nasdaq session
+    # in both EST and EDT; the job itself performs the exact market-hours check.
+    - cron: "0,30 13-21 * * 1-5"
+    # Nightly full run: fundamentals + earnings + Alpha Vantage indicators.
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Symbols (blank = SYMBOLS secret)"
+        required: false
+        default: ""
+        type: string
+      full:
+        description: "Run full refresh"
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: "Force run even when market is closed"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: market-etl
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  etl:
+    name: Market Data ETL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PGHOST: ${{ secrets.PGHOST }}
+      PGPORT: ${{ vars.PGPORT || '5432' }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGSSLMODE: ${{ vars.PGSSLMODE || 'require' }}
+
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+
+      SYMBOLS: ${{ secrets.SYMBOLS || 'AAPL,MSFT,GOOGL' }}
+      INTRADAY_ENABLED: ${{ vars.INTRADAY_ENABLED || 'true' }}
+      INTRADAY_INTERVAL: ${{ vars.INTRADAY_INTERVAL || '5min' }}
+      INTRADAY_OUTPUTSIZE: ${{ vars.INTRADAY_OUTPUTSIZE || '30' }}
+      DAILY_OUTPUTSIZE: ${{ vars.DAILY_OUTPUTSIZE || '100' }}
+      INDICATOR_MAX_RECORDS: ${{ vars.INDICATOR_MAX_RECORDS || '30' }}
+      SLEEP_FINNHUB: ${{ vars.SLEEP_FINNHUB || '1' }}
+      SLEEP_TWELVEDATA: ${{ vars.SLEEP_TWELVEDATA || '8' }}
+      SLEEP_ALPHAVANTAGE: ${{ vars.SLEEP_ALPHAVANTAGE || '15' }}
+      RUN_TRIGGER: github-actions
+      STATUS_FILE: ${{ github.workspace }}/status.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Test PostgreSQL connection
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg2
+
+          required = ["PGHOST", "PGDATABASE", "PGUSER", "PGPASSWORD"]
+          missing = [name for name in required if not os.getenv(name)]
+          if missing:
+              raise SystemExit("Missing GitHub Secrets: " + ", ".join(missing))
+
+          conn = psycopg2.connect(
+              host=os.environ["PGHOST"],
+              port=int(os.getenv("PGPORT", "5432")),
+              dbname=os.environ["PGDATABASE"],
+              user=os.environ["PGUSER"],
+              password=os.environ["PGPASSWORD"],
+              sslmode=os.getenv("PGSSLMODE", "require"),
+              connect_timeout=20,
+          )
+          with conn.cursor() as cur:
+              cur.execute("SELECT current_database(), current_user")
+              print("connected:", cur.fetchone())
+          conn.close()
+          PY
+
+      - name: Check market session
+        id: market
+        env:
+          FORCE_RUN: ${{ inputs.force }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, time
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(ZoneInfo("America/New_York"))
+          force = os.getenv("FORCE_RUN", "").lower() == "true"
+          nightly = os.getenv("EVENT_SCHEDULE") == "30 22 * * 1-5"
+          open_t = time(9, 30)
+          close_t = time(16, 0)
+
+          if force or nightly or (now.weekday() < 5 and open_t <= now.time() < close_t):
+              run = "true"
+          else:
+              run = "false"
+
+          print(f"New York time: {now.isoformat()}")
+          print(f"Market execution allowed: {run}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"run={run}\n")
+          PY
+
+      - name: Decide ETL mode
+        if: steps.market.outputs.run == 'true'
+        id: mode
+        run: |
+          if [ "${{ inputs.full }}" = "true" ] || [ "${{ github.event.schedule }}" = "30 22 * * 1-5" ]; then
+            echo "flags=--full" >> "$GITHUB_OUTPUT"
+            echo "Mode: FULL"
+          else
+            echo "flags=" >> "$GITHUB_OUTPUT"
+            echo "Mode: regular market refresh"
+          fi
+
+      - name: Run Python pipeline
+        if: steps.market.outputs.run == 'true'
+        run: |
+          ARGS="${{ steps.mode.outputs.flags }}"
+          if [ -n "${{ inputs.symbols }}" ]; then
+            ARGS="$ARGS --symbols '${{ inputs.symbols }}'"
+          fi
+          python -m pipeline.run $ARGS --trigger github-actions
+
+      - name: Setup Node.js
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install monitor dependencies
+        if: always()
+        working-directory: monitor
+        run: npm install --no-audit --no-fund
+
+      - name: Health check
+        if: always() && steps.market.outputs.run == 'true'
+        working-directory: monitor
+        env:
+          MAX_QUOTE_AGE_MIN: ${{ vars.MAX_QUOTE_AGE_MIN || '90' }}
+          MIN_SUCCESS_RATE: ${{ vars.MIN_SUCCESS_RATE || '80' }}
+          STORAGE_CAP_MB: ${{ vars.STORAGE_CAP_MB || '512' }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: node monitor.mjs --notify
+
+      - name: Upload status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-${{ github.run_id }}
+          path: status.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Run: ${url}\nEvent: ${context.eventName}\nTime: ${new Date().toISOString()}`;
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'etl-failure'
+            });
+            if (open.data.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.data[0].number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'ETL pipeline failure',
+                body,
+                labels: ['etl-failure']
+              });
+            }

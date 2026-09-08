@@ -1,0 +1,121 @@
+name: Database
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Database action"
+        type: choice
+        required: true
+        default: migrate
+        options: [migrate, backfill, verify, reset]
+      symbols:
+        description: "Symbols for backfill"
+        required: false
+        default: "AAPL,MSFT,GOOGL"
+      history:
+        description: "Daily candles per symbol"
+        required: false
+        default: "1000"
+
+concurrency:
+  group: database
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PGHOST: ${{ secrets.PGHOST }}
+      PGPORT: ${{ vars.PGPORT || '5432' }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGSSLMODE: ${{ vars.PGSSLMODE || 'require' }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      STATUS_FILE: ${{ github.workspace }}/status.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Test connection
+        run: psql -v ON_ERROR_STOP=1 -tAc "SELECT 'connected to ' || current_database();"
+
+      - name: Drop BI views
+        if: inputs.action == 'reset'
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          DECLARE v RECORD;
+          BEGIN
+            FOR v IN SELECT table_name FROM information_schema.views
+                     WHERE table_schema = 'public' AND table_name LIKE 'bi\_%'
+            LOOP
+              EXECUTE format('DROP VIEW IF EXISTS %I CASCADE', v.table_name);
+            END LOOP;
+          END $$;
+          SQL
+
+      - name: Apply schema and views
+        if: inputs.action != 'verify'
+        run: |
+          psql -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
+          psql -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
+
+      - name: Setup Python
+        if: inputs.action == 'backfill'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        if: inputs.action == 'backfill'
+        run: python -m pip install -r requirements.txt
+
+      - name: Backfill history
+        if: inputs.action == 'backfill'
+        env:
+          INTRADAY_ENABLED: "false"
+          INDICATOR_MAX_RECORDS: "100"
+        run: |
+          python -m pipeline.run \
+            --symbols "${{ inputs.symbols }}" \
+            --backfill "${{ inputs.history }}" \
+            --full \
+            --trigger github-actions-backfill
+
+      - name: Verify
+        if: always()
+        run: |
+          psql -P pager=off <<'SQL'
+          \echo '=== row counts ==='
+          SELECT 'dim_symbol' AS table_name, COUNT(*) FROM dim_symbol
+          UNION ALL SELECT 'fact_market_quote', COUNT(*) FROM fact_market_quote
+          UNION ALL SELECT 'fact_market_timeseries', COUNT(*) FROM fact_market_timeseries
+          UNION ALL SELECT 'fact_market_indicator', COUNT(*) FROM fact_market_indicator
+          UNION ALL SELECT 'fact_company_fundamental', COUNT(*) FROM fact_company_fundamental
+          UNION ALL SELECT 'fact_earnings_calendar', COUNT(*) FROM fact_earnings_calendar
+          UNION ALL SELECT 'log_api_call', COUNT(*) FROM log_api_call
+          UNION ALL SELECT 'log_pipeline_run', COUNT(*) FROM log_pipeline_run
+          ORDER BY 1;
+
+          \echo '=== BI views ==='
+          SELECT table_name FROM information_schema.views
+           WHERE table_schema = 'public' AND table_name LIKE 'bi\_%' ORDER BY 1;
+
+          \echo '=== storage ==='
+          SELECT pg_size_pretty(pg_database_size(current_database())) AS used;
+          SQL

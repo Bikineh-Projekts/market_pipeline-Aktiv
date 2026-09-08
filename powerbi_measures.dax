@@ -1,0 +1,184 @@
+// =====================================================================
+// Power BI measures for the Market Pipeline model
+//
+// How to use:
+//   1. Home -> Enter Data -> create an empty table named  _Measures
+//   2. Paste each measure below as a new measure into that table
+//   3. Hide the _Measures dummy column
+//
+// Prerequisite: bi_dim_date must be marked as the date table
+// (Table tools -> Mark as date table -> full_date)
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// PRICE
+// ---------------------------------------------------------------------
+
+Close Price =
+CALCULATE(
+    SUM ( bi_fact_price_daily[close] ),
+    LASTDATE ( bi_dim_date[full_date] )
+)
+
+Avg Close =
+AVERAGE ( bi_fact_price_daily[close] )
+
+Total Volume =
+SUM ( bi_fact_price_daily[volume] )
+
+Latest Price =
+CALCULATE (
+    SUM ( bi_fact_quote_latest[price] )
+)
+
+Daily Change % =
+AVERAGE ( bi_fact_price_daily[change_pct] )
+
+// Return over the currently selected period (first close -> last close)
+Period Return % =
+VAR FirstClose =
+    CALCULATE ( SUM ( bi_fact_price_daily[close] ), FIRSTDATE ( bi_dim_date[full_date] ) )
+VAR LastClose =
+    CALCULATE ( SUM ( bi_fact_price_daily[close] ), LASTDATE ( bi_dim_date[full_date] ) )
+RETURN
+    DIVIDE ( LastClose - FirstClose, FirstClose ) * 100
+
+Close YoY % =
+VAR Current = [Close Price]
+VAR PriorYear =
+    CALCULATE ( [Close Price], SAMEPERIODLASTYEAR ( bi_dim_date[full_date] ) )
+RETURN
+    DIVIDE ( Current - PriorYear, PriorYear ) * 100
+
+// 30-day rolling volatility (stdev of daily % change)
+Volatility 30D =
+CALCULATE (
+    STDEV.P ( bi_fact_price_daily[change_pct] ),
+    DATESINPERIOD ( bi_dim_date[full_date], MAX ( bi_dim_date[full_date] ), -30, DAY )
+)
+
+Max Close =
+MAX ( bi_fact_price_daily[close] )
+
+Min Close =
+MIN ( bi_fact_price_daily[close] )
+
+Drawdown from Peak % =
+VAR Peak =
+    CALCULATE (
+        MAX ( bi_fact_price_daily[close] ),
+        FILTER ( ALLSELECTED ( bi_dim_date ), bi_dim_date[full_date] <= MAX ( bi_dim_date[full_date] ) )
+    )
+RETURN
+    DIVIDE ( [Close Price] - Peak, Peak ) * 100
+
+
+// ---------------------------------------------------------------------
+// INDICATORS
+// ---------------------------------------------------------------------
+
+RSI =
+AVERAGE ( bi_fact_indicator_daily[rsi_14] )
+
+MACD Histogram =
+AVERAGE ( bi_fact_indicator_daily[macd_hist] )
+
+Symbols Overbought =
+CALCULATE (
+    DISTINCTCOUNT ( bi_fact_indicator_daily[symbol_id] ),
+    bi_fact_indicator_daily[rsi_signal] = "Overbought"
+)
+
+Symbols Oversold =
+CALCULATE (
+    DISTINCTCOUNT ( bi_fact_indicator_daily[symbol_id] ),
+    bi_fact_indicator_daily[rsi_signal] = "Oversold"
+)
+
+Bullish Ratio % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( bi_fact_indicator_daily ), bi_fact_indicator_daily[macd_signal_category] = "Bullish" ),
+    COUNTROWS ( bi_fact_indicator_daily )
+) * 100
+
+
+// ---------------------------------------------------------------------
+// PIPELINE HEALTH
+// ---------------------------------------------------------------------
+
+API Calls =
+COUNTROWS ( bi_fact_api_call )
+
+API Success Rate % =
+DIVIDE ( SUM ( bi_fact_api_call[is_success] ), COUNTROWS ( bi_fact_api_call ) ) * 100
+
+API Errors =
+SUM ( bi_fact_api_call[is_failure] )
+
+Avg Latency ms =
+AVERAGE ( bi_fact_api_call[response_ms] )
+
+P95 Latency ms =
+PERCENTILEX.INC ( bi_fact_api_call, bi_fact_api_call[response_ms], 0.95 )
+
+ETL Runs =
+COUNTROWS ( bi_fact_pipeline_run )
+
+ETL Success Rate % =
+DIVIDE ( SUM ( bi_fact_pipeline_run[is_success] ), COUNTROWS ( bi_fact_pipeline_run ) ) * 100
+
+Last Successful Run =
+CALCULATE (
+    MAX ( bi_fact_pipeline_run[finished_at_utc] ),
+    bi_fact_pipeline_run[status] = "success"
+)
+
+Minutes Since Last Run =
+DATEDIFF ( [Last Successful Run], UTCNOW (), MINUTE )
+
+// Traffic light for a card visual. Use with conditional formatting.
+Pipeline Status =
+VAR Age = [Minutes Since Last Run]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( Age ), "NO DATA",
+        Age > 180, "FAILING",
+        Age > 90,  "STALE",
+        [API Success Rate %] < 80, "DEGRADED",
+        "HEALTHY"
+    )
+
+Pipeline Status Color =
+SWITCH (
+    [Pipeline Status],
+    "HEALTHY",  "#22C55E",
+    "DEGRADED", "#F59E0B",
+    "STALE",    "#F59E0B",
+    "FAILING",  "#EF4444",
+    "#6B7280"
+)
+
+
+// ---------------------------------------------------------------------
+// FUNDAMENTALS / EARNINGS
+// ---------------------------------------------------------------------
+
+Market Cap =
+SUM ( bi_fact_fundamental_latest[market_cap] )
+
+Avg P/E =
+AVERAGE ( bi_fact_fundamental_latest[pe_ratio] )
+
+Upcoming Earnings Count =
+CALCULATE ( COUNTROWS ( bi_fact_earnings ), bi_fact_earnings[is_upcoming] = TRUE () )
+
+Earnings Beat Rate % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( bi_fact_earnings ), bi_fact_earnings[earnings_result] = "Beat" ),
+    CALCULATE ( COUNTROWS ( bi_fact_earnings ), bi_fact_earnings[earnings_result] IN { "Beat", "Miss", "In Line" } )
+) * 100
+
+Avg EPS Surprise % =
+AVERAGE ( bi_fact_earnings[eps_surprise_pct] )

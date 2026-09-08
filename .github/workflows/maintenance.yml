@@ -1,0 +1,59 @@
+name: Maintenance
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: database-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    name: PostgreSQL Maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PGHOST: ${{ secrets.PGHOST }}
+      PGPORT: ${{ vars.PGPORT || '5432' }}
+      PGDATABASE: ${{ secrets.PGDATABASE }}
+      PGUSER: ${{ secrets.PGUSER }}
+      PGPASSWORD: ${{ secrets.PGPASSWORD }}
+      PGSSLMODE: ${{ vars.PGSSLMODE || 'require' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Verify connection
+        env:
+          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+        run: |
+          test -n "$PGHOST" || { echo 'PGHOST secret missing'; exit 1; }
+          test -n "$PGDATABASE" || { echo 'PGDATABASE secret missing'; exit 1; }
+          test -n "$PGUSER" || { echo 'PGUSER secret missing'; exit 1; }
+          test -n "$PGPASSWORD" || { echo 'PGPASSWORD secret missing'; exit 1; }
+          psql -v ON_ERROR_STOP=1 -P pager=off -c "SELECT current_database(), current_user, version();"
+
+      - name: Apply schema and BI views
+        run: |
+          psql -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
+          psql -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
+
+      - name: Run retention and vacuum
+        run: |
+          psql -v ON_ERROR_STOP=1 -P pager=off -f sql/03_maintenance.sql
+
+      - name: Show database size
+        run: |
+          psql -v ON_ERROR_STOP=1 -P pager=off -c "SELECT current_database() AS database, pg_size_pretty(pg_database_size(current_database())) AS database_size;"
