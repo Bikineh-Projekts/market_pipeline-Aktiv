@@ -1,109 +1,138 @@
-# Market Data Pipeline — GitHub Actions + Databricks PostgreSQL
+<p align="right"><b>🇩🇪 Deutsch</b> · <a href="README.md">🇬🇧 English</a></p>
 
-این نسخه برای اجرای کامل Pipeline روی GitHub Actions آماده شده است. هیچ VPS دائمی لازم نیست.
+# 📈 Market Terminal Pro
 
-## ساختار
+Ein Live-Markt-Dashboard mit eigener Datenpipeline: Python-Collectoren ziehen Kursdaten, Fundamentaldaten und technische Indikatoren von mehreren APIs, speichern sie in PostgreSQL, und ein leichtgewichtiges Vanilla-JS-Frontend zeigt sie in Echtzeit an — inklusive Pipeline-Monitoring und einem eingebauten Datenbank-Explorer.
 
-```text
-.github/workflows/etl.yml
-.github/workflows/database.yml
-.github/workflows/maintenance.yml
-pipeline/run.py
-pipeline/config.py
-pipeline/db.py
-pipeline/collectors/*.py
-sql/01_schema.sql
-sql/02_bi_views.sql
-sql/03_maintenance.sql
-monitor/monitor.mjs
-monitor/package.json
+**Live-Demo:** [market-pipeline.onrender.com](https://market-pipeline.onrender.com/)
+
+---
+
+## ✨ Features
+
+Das Dashboard ist in vier Screens aufgeteilt (untere Navigation):
+
+| Screen | Beschreibung |
+|---|---|
+| **Market** | Vergleichs-Chart für AAPL · MSFT · GOOGL mit Live-/Normalisiert-Modus, Zeitraum-Filter (1H–24H), Crosshair mit Preis-Tooltip pro Symbol |
+| **Stats** | KPI-Dashboard: Pipeline-Performance-Chart, Reliability-Goal, Coverage-Insight, API-Call/Success-Rate/Latenz-KPIs, Activity-Balkendiagramm |
+| **Pipeline** | Success-Rate-Ring, Latency-Log, System-Status je Datenquelle (PostgreSQL, Finnhub, Alpha Vantage, Twelve Data), Live-Activity-Feed der Collector-Events |
+| **Tables** | Interaktiver DB-Explorer: alle Tabellen (DIM/FACT/LOG) durchsuchen, sortieren, filtern, paginieren |
+
+Das Frontend ist eine einzelne `index.html` (Vanilla JS + [Chart.js](https://www.chartjs.org/)), ohne Build-Step, mobile-first mit Safe-Area-Unterstützung.
+
+---
+
+## 🏗️ Architektur
+
+```
+                 ┌─────────────────┐
+                 │   index.html     │  ← Dashboard (Vanilla JS, Chart.js)
+                 │  (Market Terminal│
+                 │       Pro)       │
+                 └────────▲─────────┘
+                          │ fetch /api/tables
+                          │       /api/table/<name>
+                 ┌────────┴─────────┐
+                 │   Backend / API   │  ← liefert Tabellen-Metadaten & Zeilen
+                 └────────▲─────────┘
+                          │
+                 ┌────────┴─────────┐
+                 │   PostgreSQL      │  market_db
+                 │  dim_ / fact_ /   │
+                 │     log_ Tabellen │
+                 └────────▲─────────┘
+                          │ INSERT ... ON CONFLICT DO UPDATE
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+┌───────┴──────┐  ┌───────┴───────┐  ┌──────┴────────┐
+│  finnhub.py  │  │alphavantage.py│  │ twelvedata.py │
+│ Quote,       │  │ RSI, MACD,    │  │ OHLCV         │
+│ Fundamentals,│  │ EMA, SMA      │  │ (1day, 1min)  │
+│ Earnings     │  │               │  │               │
+└──────────────┘  └───────────────┘  └───────────────┘
 ```
 
-## 1) GitHub Secrets
+### Collectoren (`collectors/`)
 
-Repository → **Settings → Secrets and variables → Actions → Secrets**
+| Datei | Quelle | Schreibt in |
+|---|---|---|
+| `finnhub.py` | [Finnhub](https://finnhub.io/) | `fact_market_quote`, `fact_company_fundamental`, `fact_earnings_calendar`, `log_api_call` |
+| `alphavantage.py` | [Alpha Vantage](https://www.alphavantage.co/) | `fact_market_indicator` (RSI, MACD, EMA, SMA) |
+| `twelvedata.py` | [Twelve Data](https://twelvedata.com/) | `fact_market_timeseries` (OHLCV, 1day & 1min) |
 
-بسازید:
+Alle Collectoren nutzen `psycopg2` mit `ON CONFLICT DO UPDATE` (Upsert), sodass wiederholte Läufe keine Duplikate erzeugen. Symbol-, Source-, Interval- und Indicator-IDs werden über Hilfsfunktionen in `db/connection.py` (`get_symbol_id`, `get_source_id`, `get_interval_id`, `get_indicator_id`) aufgelöst bzw. bei Bedarf angelegt.
 
-```text
-PGHOST=ep-lively-frost-d8z977xq.database.us-east-2.cloud.databricks.com
-PGDATABASE=marketdb
-PGUSER=mohammadhossein.bikineh@uni-rostock.de
-PGPASSWORD=<رمز واقعی دیتابیس>
-FINNHUB_API_KEY=<...>
-TWELVEDATA_API_KEY=<...>
-ALPHAVANTAGE_API_KEY=<...>
-SYMBOLS=AAPL,MSFT,GOOGL
+---
+
+## 🚀 Setup
+
+### Voraussetzungen
+- Python 3.10+
+- PostgreSQL-Datenbank (`market_db`)
+- API-Keys für Finnhub, Alpha Vantage und Twelve Data
+
+### Environment-Variablen
+
+```bash
+# API Keys
+FINNHUB_API_KEY=...
+ALPHAVANTAGE_API_KEY=...
+TWELVEDATA_API_KEY=...
+
+# Datenbank
+DATABASE_URL=postgresql://user:password@host:5432/market_db
 ```
 
-**PGPASSWORD را هرگز داخل کد یا Git commit نکنید.** مقدار `${PGPASSWORD}` که در نمونه شما آمده فقط placeholder است؛ در Secret باید خود رمز واقعی قرار بگیرد.
+### Installation
 
-## 2) GitHub Variables
-
-Repository → **Settings → Secrets and variables → Actions → Variables**
-
-پیشنهاد:
-
-```text
-PGPORT=5432
-PGSSLMODE=require
-INTRADAY_ENABLED=true
-INTRADAY_INTERVAL=5min
-INTRADAY_OUTPUTSIZE=30
-DAILY_OUTPUTSIZE=100
-INDICATOR_MAX_RECORDS=30
-STORAGE_CAP_MB=512
-MAX_QUOTE_AGE_MIN=90
-MIN_SUCCESS_RATE=80
+```bash
+git clone https://github.com/Miladnd01/market-pipeline.git
+cd market-pipeline
+pip install -r requirements.txt
 ```
 
-## 3) راه‌اندازی اولیه دیتابیس
+### Collectoren manuell ausführen
 
-بعد از Push:
+```python
+from collectors import finnhub, alphavantage, twelvedata
 
-**Actions → Database → Run workflow → action = migrate**
-
-برای Backfill:
-
-**Actions → Database → Run workflow → action = backfill**
-
-مثلاً:
-
-```text
-symbols: AAPL,MSFT,GOOGL
-history: 1000
+for symbol in ["AAPL", "MSFT", "GOOGL"]:
+    finnhub.run(symbol)
+    alphavantage.run(symbol, interval="daily")
+    twelvedata.run(symbol)
 ```
 
-## 4) ETL زمان‌بندی‌شده
+> ⏱️ Alpha Vantage (kostenloses Tier: 25 Requests/Tag) wartet bewusst 15s zwischen Indikator-Abrufen; Twelve Data 8s zwischen Intervallen — auf die jeweiligen Rate-Limits abgestimmt.
 
-`etl.yml` از دو نوع اجرا استفاده می‌کند:
+### Dashboard lokal öffnen
 
-- در روزهای دوشنبه تا جمعه، هر ۳۰ دقیقه در پنجره زمانی پوشش‌دهنده بازار آمریکا اجرا می‌شود و کد داخلی زمان نیویورک را بررسی می‌کند.
-- هر شب ساعت 22:30 UTC یک Full Run اجرا می‌شود و `--full` را فعال می‌کند؛ بنابراین fundamentals، earnings و Alpha Vantage فقط در همین اجرای روزانه مصرف می‌شوند.
+`index.html` ist statisch und lädt Daten über `/api/tables` bzw. `/api/table/<name>` — dafür muss ein Backend/API-Server unter derselben Origin laufen (siehe `API`-Konstante im `<script>`-Block). Ohne Backend zeigt der **Market**-Screen weiterhin synthetische Beispielkurse an, der **Tables**-Screen meldet `OFFLINE`.
 
-آخر هفته‌ها هیچ Scheduleای وجود ندارد.
+---
 
-## 5) اجرای دستی
+## 🗄️ Datenbankschema (Konvention)
 
-**Actions → ETL → Run workflow**
+| Präfix | Bedeutung | Beispiele |
+|---|---|---|
+| `dim_` | Stammdaten / Dimensionstabellen | Symbole, Quellen, Intervalle, Indikatoren |
+| `fact_` | Faktendaten (Zeitreihen, Kennzahlen) | `fact_market_quote`, `fact_market_timeseries`, `fact_market_indicator`, `fact_company_fundamental`, `fact_earnings_calendar` |
+| `log_` | Protokolldaten | `log_api_call` (Endpoint, HTTP-Status, Response-Zeit, Fehler) |
 
-سه ورودی دارد:
+Der **Tables**-Screen im Dashboard zeigt PK/FK-Spalten farblich hervorgehoben, unterstützt Volltextsuche (server-seitig via `ILIKE`), spaltenweise Sortierung und dynamische Filter (Datum, Symbol-ID, Indicator-ID, Interval-ID, Endpoint, HTTP-Status).
 
-- `symbols`: مثلاً `AAPL,MSFT,TSLA`
-- `full`: فعال کردن Full Run
-- `force`: اجرای دستی حتی خارج از ساعات بازار
+---
 
-## 6) نگهداری
+## 🎨 Frontend-Stack
 
-`maintenance.yml` در روز اول هر ماه اجرا می‌شود و:
+- **Reines HTML/CSS/JS** — kein Build-Step, keine Frameworks
+- **[Chart.js 4](https://www.chartjs.org/)** für Preis-Chart, Pipeline-Performance-Chart und Success-Ring
+- **Inline-SVG-Icons** (kein externer Icon-Font, funktioniert offline/CSP-sicher)
+- **IBM Plex Mono / IBM Plex Sans** als Schriftarten
+- Dark-Theme, mobile-first, `env(safe-area-inset-*)` für Notch-Geräte
 
-- API log قدیمی را حذف می‌کند.
-- Intraday قدیمی را حذف می‌کند.
-- Quote قدیمی را حذف می‌کند.
-- Run log قدیمی را حذف می‌کند.
-- `VACUUM (ANALYZE)` را اجرا می‌کند.
-- حجم دیتابیس را گزارش می‌کند.
+---
 
-## نکته مهم درباره APIهای رایگان
+## 📜 Lizenz & Credits
 
-Alpha Vantage در این پروژه عمداً فقط در Full Run اجرا می‌شود تا سهمیه روزانه زود مصرف نشود. Intraday نیز بیشترین رشد حجم را ایجاد می‌کند؛ برای کاهش ذخیره می‌توانید `INTRADAY_ENABLED=false` قرار دهید.
+© Milan Bikineh · Alle Rechte vorbehalten · 2025
