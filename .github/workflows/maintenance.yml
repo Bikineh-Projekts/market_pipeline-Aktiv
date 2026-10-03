@@ -37,8 +37,12 @@ jobs:
 
       - name: Resolve the admin connection string
         run: |
+          echo "DATABASE_URL        : ${#DATABASE_URL} characters"
+          echo "DATABASE_URL_DIRECT : ${#DATABASE_URL_DIRECT} characters"
+
           if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_URL_DIRECT" ]; then
-            echo "::error::No database secret found."
+            echo "::error title=Missing secret::Neither DATABASE_URL nor DATABASE_URL_DIRECT is set."
+            echo "Add DATABASE_URL under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
 
