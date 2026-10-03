@@ -64,9 +64,20 @@ jobs:
 
       - name: Resolve the admin connection string
         run: |
+          # Report which secrets exist, without revealing their values.
+          echo "DATABASE_URL        : ${#DATABASE_URL} characters"
+          echo "DATABASE_URL_DIRECT : ${#DATABASE_URL_DIRECT} characters"
+
           if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_URL_DIRECT" ]; then
-            echo "::error::No database secret found."
-            echo "Add DATABASE_URL under Settings -> Secrets and variables -> Actions."
+            echo "::error title=Missing secret::Neither DATABASE_URL nor DATABASE_URL_DIRECT is set."
+            echo ""
+            echo "Add it under:"
+            echo "  Settings -> Secrets and variables -> Actions -> New repository secret"
+            echo "Name  : DATABASE_URL"
+            echo "Value : postgresql://USER:PASSWORD@HOST/marketdb?sslmode=require"
+            echo ""
+            echo "Note the name is case sensitive, and an Actions *variable*"
+            echo "is not the same thing as an Actions *secret*."
             exit 1
           fi
 
@@ -81,6 +92,15 @@ jobs:
               echo "DATABASE_URL is already a direct endpoint."
             fi
           fi
+
+          case "$ADMIN_URL" in
+            postgres://*|postgresql://*) ;;
+            *)
+              echo "::error title=Malformed connection string::The secret does not start with postgresql://"
+              echo "Paste the whole string from Neon, including the scheme and ?sslmode=require."
+              exit 1
+              ;;
+          esac
 
           echo "::add-mask::$ADMIN_URL"
           echo "ADMIN_URL=$ADMIN_URL" >> "$GITHUB_ENV"
@@ -138,7 +158,7 @@ jobs:
             --trigger github-actions-backfill
 
       - name: Verify
-        if: always()
+        if: always() && env.ADMIN_URL != ''
         run: |
           psql "$ADMIN_URL" -P pager=off <<'SQL'
           \echo '=== row counts ==='
