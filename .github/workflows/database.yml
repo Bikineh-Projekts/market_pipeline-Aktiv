@@ -1,10 +1,28 @@
 name: Database
 
+# ---------------------------------------------------------------------
+# All database work, run from the GitHub UI. Nothing installed locally.
+#
+#   Actions -> Database -> Run workflow -> choose an action:
+#
+#     migrate   create tables, indexes and BI views. Safe to re-run.
+#     backfill  load deep price history, then verify.
+#     verify    print row counts and storage use. Changes nothing.
+#     reset     drop only the bi_* views and rebuild them. Data untouched.
+#
+# Pooled vs direct endpoint:
+# Neon's pooled endpoint (the hostname containing "-pooler") runs PgBouncer
+# in transaction mode, where SET, temporary tables and SQL-level PREPARE
+# are unavailable. Neon recommends a direct connection for migrations and
+# admin work, so every step here uses ADMIN_URL, the direct endpoint.
+# If you only set DATABASE_URL, this workflow derives the direct URL by
+# stripping "-pooler" -- no second secret required.
+# ---------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Database action"
+        description: "What to do"
         type: choice
         required: true
         default: migrate
@@ -14,7 +32,7 @@ on:
         required: false
         default: "AAPL,MSFT,GOOGL"
       history:
-        description: "Daily candles per symbol"
+        description: "Daily candles per symbol (Twelve Data allows up to 5000)"
         required: false
         default: "1000"
 
@@ -29,53 +47,74 @@ jobs:
   database:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     env:
-      PGHOST: ${{ secrets.PGHOST }}
-      PGPORT: ${{ vars.PGPORT || '5432' }}
-      PGDATABASE: ${{ secrets.PGDATABASE }}
-      PGUSER: ${{ secrets.PGUSER }}
-      PGPASSWORD: ${{ secrets.PGPASSWORD }}
-      PGSSLMODE: ${{ vars.PGSSLMODE || 'require' }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
       FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
       STATUS_FILE: ${{ github.workspace }}/status.json
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+      - name: Install psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
-      - name: Test connection
-        run: psql -v ON_ERROR_STOP=1 -tAc "SELECT 'connected to ' || current_database();"
+      - name: Resolve the admin connection string
+        run: |
+          if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_URL_DIRECT" ]; then
+            echo "::error::No database secret found."
+            echo "Add DATABASE_URL under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          if [ -n "$DATABASE_URL_DIRECT" ]; then
+            ADMIN_URL="$DATABASE_URL_DIRECT"
+            echo "Using DATABASE_URL_DIRECT."
+          else
+            ADMIN_URL=$(echo "$DATABASE_URL" | sed 's/-pooler\./\./')
+            if [ "$ADMIN_URL" != "$DATABASE_URL" ]; then
+              echo "Derived the direct endpoint from the pooled DATABASE_URL."
+            else
+              echo "DATABASE_URL is already a direct endpoint."
+            fi
+          fi
+
+          echo "::add-mask::$ADMIN_URL"
+          echo "ADMIN_URL=$ADMIN_URL" >> "$GITHUB_ENV"
+
+      - name: Test the connection
+        run: |
+          psql "$ADMIN_URL" -tAc \
+            "SELECT 'connected to ' || current_database() || ' as ' || current_user;"
 
       - name: Drop BI views
         if: inputs.action == 'reset'
         run: |
-          psql -v ON_ERROR_STOP=1 <<'SQL'
+          psql "$ADMIN_URL" -v ON_ERROR_STOP=1 <<'SQL'
           DO $$
           DECLARE v RECORD;
           BEGIN
             FOR v IN SELECT table_name FROM information_schema.views
-                     WHERE table_schema = 'public' AND table_name LIKE 'bi\_%'
+                      WHERE table_schema = 'public' AND table_name LIKE 'bi\_%'
             LOOP
               EXECUTE format('DROP VIEW IF EXISTS %I CASCADE', v.table_name);
             END LOOP;
           END $$;
           SQL
+          echo "Views dropped. Tables and data untouched."
 
       - name: Apply schema and views
         if: inputs.action != 'verify'
         run: |
-          psql -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
-          psql -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
+          psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
+          psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
+          echo "Schema and BI views applied."
 
-      - name: Setup Python
+      - uses: actions/setup-python@v5
         if: inputs.action == 'backfill'
-        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -83,39 +122,51 @@ jobs:
 
       - name: Install dependencies
         if: inputs.action == 'backfill'
-        run: python -m pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Backfill history
         if: inputs.action == 'backfill'
         env:
+          DATABASE_URL: ${{ env.ADMIN_URL }}
           INTRADAY_ENABLED: "false"
           INDICATOR_MAX_RECORDS: "100"
         run: |
           python -m pipeline.run \
             --symbols "${{ inputs.symbols }}" \
-            --backfill "${{ inputs.history }}" \
+            --backfill ${{ inputs.history }} \
             --full \
             --trigger github-actions-backfill
 
       - name: Verify
         if: always()
         run: |
-          psql -P pager=off <<'SQL'
+          psql "$ADMIN_URL" -P pager=off <<'SQL'
           \echo '=== row counts ==='
           SELECT 'dim_symbol' AS table_name, COUNT(*) FROM dim_symbol
-          UNION ALL SELECT 'fact_market_quote', COUNT(*) FROM fact_market_quote
-          UNION ALL SELECT 'fact_market_timeseries', COUNT(*) FROM fact_market_timeseries
-          UNION ALL SELECT 'fact_market_indicator', COUNT(*) FROM fact_market_indicator
+          UNION ALL SELECT 'fact_market_quote',        COUNT(*) FROM fact_market_quote
+          UNION ALL SELECT 'fact_market_timeseries',   COUNT(*) FROM fact_market_timeseries
+          UNION ALL SELECT 'fact_market_indicator',    COUNT(*) FROM fact_market_indicator
           UNION ALL SELECT 'fact_company_fundamental', COUNT(*) FROM fact_company_fundamental
-          UNION ALL SELECT 'fact_earnings_calendar', COUNT(*) FROM fact_earnings_calendar
-          UNION ALL SELECT 'log_api_call', COUNT(*) FROM log_api_call
-          UNION ALL SELECT 'log_pipeline_run', COUNT(*) FROM log_pipeline_run
+          UNION ALL SELECT 'fact_earnings_calendar',   COUNT(*) FROM fact_earnings_calendar
+          UNION ALL SELECT 'log_api_call',             COUNT(*) FROM log_api_call
+          UNION ALL SELECT 'log_pipeline_run',         COUNT(*) FROM log_pipeline_run
           ORDER BY 1;
 
           \echo '=== BI views ==='
           SELECT table_name FROM information_schema.views
            WHERE table_schema = 'public' AND table_name LIKE 'bi\_%' ORDER BY 1;
 
-          \echo '=== storage ==='
+          \echo '=== storage (Neon free plan cap = 512 MB) ==='
           SELECT pg_size_pretty(pg_database_size(current_database())) AS used;
+
+          \echo '=== last runs ==='
+          SELECT started_at_utc, status, symbols_ok, symbols_failed,
+                 LEFT(COALESCE(error_msg, ''), 60) AS error
+            FROM log_pipeline_run ORDER BY run_id DESC LIMIT 5;
+
+          \echo '=== recent API errors ==='
+          SELECT called_at_utc, endpoint, http_status, LEFT(COALESCE(error_msg,''), 60) AS error
+            FROM log_api_call
+           WHERE http_status IS NULL OR http_status >= 400
+           ORDER BY called_at_utc DESC LIMIT 5;
           SQL
