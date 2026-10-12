@@ -49,6 +49,11 @@ SLEEP_ALPHAVANTAGE = _int("SLEEP_ALPHAVANTAGE", 15)
 
 HTTP_TIMEOUT = _int("HTTP_TIMEOUT", 30)
 
+# Retries for transient failures only (timeouts, connection errors, 5xx).
+# Quota and 4xx responses are never retried.
+HTTP_RETRIES = _int("HTTP_RETRIES", 2)
+HTTP_BACKOFF = float(os.getenv("HTTP_BACKOFF", "1.5"))
+
 # --- run metadata -----------------------------------------------------
 RUN_TRIGGER = os.getenv("RUN_TRIGGER", "manual")
 

@@ -1,0 +1,125 @@
+name: CI
+
+# ---------------------------------------------------------------------
+# Runs on every push and pull request. No secrets and no API keys: the
+# suite talks to a throwaway Postgres service container and a mock
+# provider on localhost, so it costs nothing and spends no API quota.
+#
+# This is what stops a change from quietly breaking the Power BI model.
+# ---------------------------------------------------------------------
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: market_pipeline_test
+        ports:
+          - 5432:5432
+        # Without this the first test can race the container's startup.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/market_pipeline_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run the test suite
+        run: python -m pytest -v
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Python compiles
+        run: python -m compileall -q pipeline tests
+
+      - name: Workflows are valid YAML
+        run: |
+          pip install --quiet PyYAML
+          python - <<'PY'
+          import pathlib, sys, yaml
+
+          bad = []
+          workflows = sorted(pathlib.Path(".github/workflows").iterdir())
+
+          for path in workflows:
+              # GitHub only reads .yml/.yaml here. A file without the
+              # extension is silently ignored and never shows up in the
+              # Actions tab -- which is exactly how the secrets-check
+              # workflow went missing once.
+              if path.suffix not in (".yml", ".yaml"):
+                  bad.append(f"{path.name}: not a .yml/.yaml file, Actions will ignore it")
+                  continue
+              if " " in path.name:
+                  bad.append(f"{path.name}: filename contains a space")
+              try:
+                  spec = yaml.safe_load(path.read_text())
+              except yaml.YAMLError as exc:
+                  bad.append(f"{path.name}: {exc}")
+                  continue
+              if not spec or "jobs" not in spec:
+                  bad.append(f"{path.name}: no jobs defined")
+
+          for line in bad:
+              print(f"::error::{line}")
+          print(f"checked {len(workflows)} workflow file(s)")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Monitor parses
+        run: node --check monitor/monitor.mjs
+
+      - name: No credentials committed
+        run: |
+          # A connection string with an inline password must never land in
+          # the repo. Catches a pasted DATABASE_URL in a file or a doc.
+          if grep -rInE 'postgres(ql)?://[A-Za-z0-9_.-]+:[^@/[:space:]]{6,}@' \
+               --exclude-dir=.git . \
+             | grep -vE 'USER:PASSWORD|user:password|role_name:password|postgres:postgres|USERNAME:PASSWORD'; then
+            echo "::error::A connection string with a real password appears to be committed."
+            exit 1
+          fi
+          echo "no committed credentials found"
