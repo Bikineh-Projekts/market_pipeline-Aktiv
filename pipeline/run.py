@@ -19,6 +19,7 @@ import logging
 import sys
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -135,7 +136,9 @@ def main(argv=None) -> int:
     symbols = ([s.strip().upper() for s in options.symbols.split(",") if s.strip()]
                if options.symbols else config.SYMBOLS)
 
-    run_uid = config.RUN_UID or f"local-{int(time.time())}"
+    # Whole seconds are not granular enough: two local runs started in the
+    # same second would share a uid and the second would overwrite the first.
+    run_uid = config.RUN_UID or f"local-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     started = _now()
     started_perf = time.perf_counter()
 

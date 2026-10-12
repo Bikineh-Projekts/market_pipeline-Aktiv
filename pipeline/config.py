@@ -51,7 +51,18 @@ HTTP_TIMEOUT = _int("HTTP_TIMEOUT", 30)
 
 # --- run metadata -----------------------------------------------------
 RUN_TRIGGER = os.getenv("RUN_TRIGGER", "manual")
-RUN_UID = os.getenv("GITHUB_RUN_ID") or None
+
+# log_pipeline_run.run_uid is UNIQUE and the insert is ON CONFLICT DO UPDATE,
+# so a repeated uid silently overwrites an earlier run's row instead of adding
+# one. GITHUB_RUN_ID stays the same when you re-run a workflow, which would
+# erase the failed attempt you were trying to diagnose -- GITHUB_RUN_ATTEMPT
+# is what distinguishes them.
+_gh_run = os.getenv("GITHUB_RUN_ID")
+if _gh_run:
+    RUN_UID = f"gha-{_gh_run}-{os.getenv('GITHUB_RUN_ATTEMPT', '1')}"
+else:
+    RUN_UID = None
+
 STATUS_FILE = os.getenv("STATUS_FILE", "status.json")
 
 
