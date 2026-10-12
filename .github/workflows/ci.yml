@@ -113,13 +113,4 @@ jobs:
         run: node --check monitor/monitor.mjs
 
       - name: No credentials committed
-        run: |
-          # A connection string with an inline password must never land in
-          # the repo. Catches a pasted DATABASE_URL in a file or a doc.
-          if grep -rInE 'postgres(ql)?://[A-Za-z0-9_.-]+:[^@/[:space:]]{6,}@' \
-               --exclude-dir=.git . \
-             | grep -vE 'USER:PASSWORD|user:password|role_name:password|postgres:postgres|USERNAME:PASSWORD'; then
-            echo "::error::A connection string with a real password appears to be committed."
-            exit 1
-          fi
-          echo "no committed credentials found"
+        run: python tools/check_no_credentials.py

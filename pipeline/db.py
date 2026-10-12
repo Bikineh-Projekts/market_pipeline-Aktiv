@@ -19,7 +19,7 @@ from contextlib import contextmanager
 
 import psycopg2
 
-from . import config
+from . import auth, config
 
 logger = logging.getLogger(__name__)
 
@@ -28,24 +28,55 @@ _dim_cache: dict[str, int] = {}
 
 
 def connect():
-    """Open a new connection. Prefers DATABASE_URL when it is set."""
+    """
+    Open a new connection.
+
+    With Lakebase OAuth configured, the password in DATABASE_URL is replaced
+    by a freshly minted token; everything else about the string is kept. A
+    native Postgres password role needs none of that, because those
+    passwords do not expire -- see pipeline/auth.py.
+    """
     if config.DATABASE_URL:
-        return psycopg2.connect(config.DATABASE_URL, connect_timeout=20)
+        url = config.DATABASE_URL
+        if config.lakebase_oauth_enabled():
+            url = auth.apply_token(url, auth.database_token())
+        return psycopg2.connect(url, connect_timeout=20)
+
+    password = config.PGPASSWORD
+    user = config.PGUSER
+    if config.lakebase_oauth_enabled():
+        password = auth.database_token()
+        user = user or config.DATABRICKS_CLIENT_ID
 
     return psycopg2.connect(
         host=config.PGHOST,
         port=config.PGPORT,
         dbname=config.PGDATABASE,
-        user=config.PGUSER,
-        password=config.PGPASSWORD,
+        user=user,
+        password=password,
         sslmode=config.PGSSLMODE,
         connect_timeout=20,
     )
 
 
 def get_connection():
-    """The shared connection for this process, reconnecting if it dropped."""
+    """
+    The shared connection for this process, reconnecting if it dropped.
+
+    Under OAuth the credential expires after an hour, which a backfill can
+    outlast. When the cached token nears expiry the connection is replaced
+    rather than left to fail on its next query.
+    """
     global _connection
+
+    if (_connection is not None and not _connection.closed
+            and config.lakebase_oauth_enabled() and not auth.token_is_fresh()):
+        logger.info("Lakebase credential is close to expiry, reconnecting")
+        try:
+            _connection.close()
+        except Exception:  # a dead connection is what we are replacing
+            pass
+        _connection = None
 
     if _connection is None or _connection.closed:
         _connection = connect()
@@ -60,6 +91,7 @@ def close_connection() -> None:
         _connection.close()
     _connection = None
     _dim_cache.clear()
+    auth.reset_cache()
 
 
 @contextmanager
