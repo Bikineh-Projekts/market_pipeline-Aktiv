@@ -96,7 +96,12 @@ def collect_fundamentals(symbol: str, run_id: int | None = None) -> int:
         exchange=profile.get("exchange"),
         country=profile.get("country"),
         currency=profile.get("currency"),
-        industry=profile.get("finnhubIndustry"),
+        # Finnhub's free profile2 returns one classification field, and its
+        # values ("Technology", "Retail", "Pharmaceuticals") are sector
+        # granularity, not industry. Storing it as the sector keeps the
+        # Power BI sector slicer populated; industry stays empty because the
+        # free tier genuinely does not provide that level of detail.
+        sector=profile.get("finnhubIndustry"),
     )
 
     with db.cursor() as cur:

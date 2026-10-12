@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from psycopg2.extras import Json, execute_batch
 
 from .. import config, db
-from .base import ApiError, fetch, pause
+from .base import ApiError, RateLimited, fetch, pause
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +127,12 @@ def run(symbol: str, interval: str = "daily", run_id: int | None = None) -> int:
     for index, indicator in enumerate(INDICATORS):
         try:
             rows += collect_indicator(symbol, indicator, interval, run_id=run_id)
+        except RateLimited:
+            # The quota is spent. Stop immediately rather than spending the
+            # remaining pauses on calls that are certain to fail.
+            print("    alphavantage quota reached, skipping remaining indicators")
+            raise
         except ApiError as exc:
-            message = str(exc).lower()
-            if "rate limit" in message or "frequency" in message or "25 requests" in message:
-                print(f"    alphavantage quota reached, skipping remaining indicators")
-                raise
             logger.warning("%s failed for %s: %s", indicator, symbol, exc)
             print(f"    alphavantage {indicator:<4} {symbol}: failed ({exc})")
 

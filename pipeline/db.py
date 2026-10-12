@@ -88,12 +88,22 @@ def apply_sql_file(path: str) -> None:
 # dimension helpers
 # ---------------------------------------------------------------------
 def _upsert_dim(table: str, key_col: str, key_val: str, pk_col: str, extra: dict | None = None) -> int:
-    """Fetch-or-create a dimension row and return its surrogate key."""
-    cache_key = f"{table}:{key_val}"
-    if cache_key in _dim_cache:
-        return _dim_cache[cache_key]
+    """
+    Fetch-or-create a dimension row and return its surrogate key.
 
+    The cache only short-circuits lookups that carry no new attributes.
+    Serving a cache hit to a call that DOES carry attributes would skip the
+    write entirely: within one run, collect_quote looks up the symbol with
+    no profile and caches the id, then collect_fundamentals passes the real
+    company name, exchange and country -- and those would never be stored,
+    leaving dim_symbol permanently NULL and every Power BI slicer reading
+    "UNKNOWN" / "Uncategorized".
+    """
     extra = {k: v for k, v in (extra or {}).items() if v is not None}
+
+    cache_key = f"{table}:{key_val}"
+    if not extra and cache_key in _dim_cache:
+        return _dim_cache[cache_key]
     cols = [key_col] + list(extra.keys())
     vals = [key_val] + list(extra.values())
 
