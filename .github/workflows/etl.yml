@@ -50,6 +50,10 @@ jobs:
       FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
       ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
       TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      LAKEBASE_ENDPOINT: ${{ secrets.LAKEBASE_ENDPOINT }}
       SYMBOLS: ${{ secrets.SYMBOLS || 'AAPL,MSFT,GOOGL' }}
       INTRADAY_ENABLED: ${{ vars.INTRADAY_ENABLED || 'true' }}
       RUN_TRIGGER: github-actions

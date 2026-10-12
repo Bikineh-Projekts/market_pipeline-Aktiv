@@ -23,6 +23,38 @@ PGUSER = os.getenv("PGUSER", "")
 PGPASSWORD = os.getenv("PGPASSWORD", "")
 PGSSLMODE = os.getenv("PGSSLMODE", "require")
 
+# --- Databricks Lakebase OAuth (optional) -----------------------------
+# Lakebase offers two ways to authenticate, and the difference matters for
+# a scheduled pipeline:
+#
+#   native Postgres password role -- the password does not expire. This is
+#       the right choice here and needs none of the settings below: put the
+#       whole connection string in DATABASE_URL and you are done.
+#
+#   OAuth token -- the "password" is a token that dies after 60 minutes, so
+#       a fixed DATABASE_URL secret stops working within the hour. Setting
+#       the four variables below makes the pipeline mint a fresh token for
+#       every connection and refresh it mid-run, which is the only way
+#       OAuth survives a long backfill.
+#
+# All four must be present for OAuth to engage; otherwise DATABASE_URL is
+# used exactly as given.
+DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "").strip().rstrip("/")
+DATABRICKS_CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID", "").strip()
+DATABRICKS_CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET", "").strip()
+# projects/<project-id>/branches/<branch-id>/endpoints/<endpoint-id>
+LAKEBASE_ENDPOINT = os.getenv("LAKEBASE_ENDPOINT", "").strip()
+
+# Refresh this many seconds before the token's stated expiry, so a query
+# never starts with a credential that dies while it runs.
+TOKEN_REFRESH_MARGIN = _int("TOKEN_REFRESH_MARGIN", 300)
+
+
+def lakebase_oauth_enabled() -> bool:
+    return all((DATABRICKS_HOST, DATABRICKS_CLIENT_ID,
+                DATABRICKS_CLIENT_SECRET, LAKEBASE_ENDPOINT))
+
+
 # --- api keys ---------------------------------------------------------
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
