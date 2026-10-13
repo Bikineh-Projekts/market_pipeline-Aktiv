@@ -127,19 +127,53 @@ jobs:
         run: |
           python - <<'PY'
           import sys, yaml
+
           spec = yaml.safe_load(open("render.yaml"))
           services = spec.get("services") or []
           if not services:
-              print("::error::render.yaml defines no services"); sys.exit(1)
-          svc = services[0]
-          for field in ("type", "name", "buildCommand", "startCommand", "healthCheckPath"):
-              if field not in svc:
-                  print(f"::error::render.yaml service is missing {field}"); sys.exit(1)
-          # The old project pinged /healt for months and never noticed.
-          if svc["healthCheckPath"] != "/health":
-              print(f"::error::healthCheckPath is {svc['healthCheckPath']}, expected /health")
+              print("::error::render.yaml defines no services")
               sys.exit(1)
-          print(f"render.yaml OK: {svc['name']} ({svc['type']}), health at {svc['healthCheckPath']}")
+
+          bad = []
+          for svc in services:
+              name = svc.get("name", "<unnamed>")
+              for field in ("type", "name", "healthCheckPath"):
+                  if field not in svc:
+                      bad.append(f"{name}: missing {field}")
+
+              # A docker service is built from the Dockerfile and has no
+              # build or start command; a native runtime service needs both.
+              # Requiring buildCommand unconditionally is what broke this
+              # check when the blueprint switched to Docker.
+              runtime = svc.get("runtime", svc.get("env", ""))
+              if runtime == "docker":
+                  if "dockerfilePath" not in svc:
+                      bad.append(f"{name}: runtime is docker but dockerfilePath is missing")
+                  for field in ("buildCommand", "startCommand"):
+                      if field in svc:
+                          bad.append(f"{name}: {field} is ignored for a docker runtime; remove it")
+              else:
+                  for field in ("buildCommand", "startCommand"):
+                      if field not in svc:
+                          bad.append(f"{name}: missing {field}")
+
+              # The old project pinged /healt for months and never noticed.
+              if svc.get("healthCheckPath") not in (None, "/health"):
+                  bad.append(f"{name}: healthCheckPath is {svc['healthCheckPath']}, expected /health")
+
+              for env in svc.get("envVars", []):
+                  if env.get("key") == "DATABASE_URL" and env.get("sync") is not False:
+                      bad.append(f"{name}: DATABASE_URL must be sync: false, never a committed value")
+
+          for line in bad:
+              print(f"::error::{line}")
+          if bad:
+              sys.exit(1)
+
+          for svc in services:
+              print(f"render.yaml OK: {svc['name']} ({svc['type']}, "
+                    f"runtime {svc.get('runtime', 'native')}), "
+                    f"health at {svc.get('healthCheckPath')}")
           PY
 
       - name: No credentials committed

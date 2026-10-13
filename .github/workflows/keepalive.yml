@@ -1,0 +1,106 @@
+name: Keep awake
+
+# ---------------------------------------------------------------------
+# Pings the Render dashboard so a free instance does not spin down.
+#
+# BE AWARE OF THE TRADE-OFF before enabling this.
+#
+# Nothing depends on this service being awake: it only displays data, and
+# GitHub Actions collects it. Letting it sleep costs one slow first visit
+# (a few seconds) and nothing else. This workflow buys away that wait, and
+# in exchange it spends:
+#
+#   * Render free instance hours. The allowance is 750 per month; a month
+#     is ~730 hours, so an always-awake service uses nearly all of it. One
+#     service fits; two do not.
+#   * GitHub Actions minutes, which are free on a public repository and
+#     counted against 2000/month on a private one.
+#
+# So it pings only during waking hours, not around the clock: 06:00-21:00
+# UTC, every 14 minutes. That is under the 15-minute spin-down window with
+# a minute to spare, and it leaves the service asleep overnight when no one
+# is looking, which is where the instance-hour savings come from.
+#
+# Measured, not estimated: the cron fires at minutes 0, 14, 28, 42 and 56
+# of each hour from 06:00 to 20:59 UTC.
+#
+#   5 pings/hour x 15 hours x 30 days  =  2,250 runs/month
+#   at ~12 seconds each                =  ~450 Actions-minutes/month
+#   instance hours kept awake          =  ~450 of the free 750
+#
+# The largest gap between pings is 14 minutes (4 across the hour boundary),
+# both under the 15-minute spin-down window.
+#
+# ONE HONEST CAVEAT: GitHub does not guarantee cron punctuality. Scheduled
+# runs are queued at best effort and can be delayed by several minutes
+# under load, so a gap will occasionally exceed 15 minutes and the instance
+# will sleep anyway. This reduces cold starts; it does not abolish them.
+# Nothing depends on it either way.
+#
+# To disable it: Actions -> Keep awake -> ... -> Disable workflow. Nothing
+# breaks; the dashboard just sleeps again.
+# ---------------------------------------------------------------------
+on:
+  schedule:
+    # Every 14 minutes, 06:00-21:00 UTC. Not */14 across all 24 hours:
+    # overnight pings burn instance hours nobody benefits from.
+    - cron: "*/14 6-20 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Ping the dashboard
+        env:
+          # Set this as an Actions *variable* (not a secret) -- it is a
+          # public URL. Without it this job does nothing rather than
+          # guessing an address.
+          URL: ${{ vars.RENDER_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::notice::RENDER_URL variable is not set, so there is nothing to ping."
+            echo "Settings -> Secrets and variables -> Actions -> Variables tab,"
+            echo "name RENDER_URL, value https://your-service.onrender.com"
+            exit 0
+          fi
+
+          # /health, not /. It returns a few bytes of JSON instead of
+          # rendering the whole dashboard and running every query behind
+          # it, so the ping is cheap for the instance and the database.
+          TARGET="${URL%/}/health"
+          echo "Pinging $TARGET"
+
+          # A spun-down instance takes time to wake, so allow for it, and
+          # retry rather than reporting failure on the cold-start attempt.
+          for attempt in 1 2 3; do
+            CODE=$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 90 "$TARGET" || echo "000")
+            BODY=$(head -c 300 /tmp/body 2>/dev/null || true)
+
+            if [ "$CODE" = "200" ]; then
+              echo "awake: HTTP $CODE $BODY"
+              exit 0
+            fi
+
+            echo "attempt $attempt: HTTP $CODE $BODY"
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+
+          # 503 means the app is up but cannot reach the database -- worth
+          # knowing, and distinct from the service being unreachable.
+          if [ "$CODE" = "503" ]; then
+            echo "::warning::The service is awake but reports the database unreachable: $BODY"
+            exit 0
+          fi
+
+          echo "::error::Could not reach $TARGET after 3 attempts (last status $CODE)."
+          exit 1
