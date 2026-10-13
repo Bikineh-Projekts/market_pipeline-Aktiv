@@ -5,6 +5,35 @@ deletes the free database — which it does, 30 days after it is created —
 you lose nothing, and can rebuild from your copy without interrupting
 either the backup or the pipeline.
 
+## Nothing arrives on its own — read this first
+
+**No part of this project can push data into your PostgreSQL.** Not the
+ETL, not Render, not GitHub Actions. Your database listens on your own
+machine, behind your own router; everything else here is on the public
+internet with no route to it, no credentials for it, and no knowledge that
+it exists. That is not a limitation to be fixed — a database anyone on the
+internet could write to is a database anyone on the internet could empty.
+
+So data appears in your Postgres only when something **on your machine**
+goes and fetches it. That something is `tools/replicate.py`, and until you
+start it, your tables stay exactly as empty as the day you created them,
+however healthy the Render side is.
+
+If nothing has arrived, the first question is not "what broke" — it is
+"is the replicator running". Start here:
+
+```bash
+python tools/local_setup.py \
+    --source "postgresql://...render.com/market_db_aktiv" \
+    --target "postgresql://postgres:PASSWORD@localhost:5432/marketdb"
+```
+
+That creates the tables, fills them once, and tells you what to run to
+keep them current. It is safe to run again, and it explains what to do
+rather than printing a stack trace when it cannot connect.
+
+---
+
 Two paths do this, and they are for different things.
 
 | | `tools/replicate.py` | the `data-export` branch |
@@ -116,7 +145,17 @@ costs about 465.
 
 ### 4. Leave it running
 
-On Linux, as a user service that restarts itself:
+**On Windows**, open `tools\local_sync.cmd` in Notepad, put your two
+connection strings at the top, save, and double-click it. It checks that
+Python is on PATH, installs `psycopg2-binary` if it is missing, and keeps
+copying until you close the window — restarting itself if the process
+dies, which is the failure that matters: a copy that quietly stopped three
+days ago still looks like it is working.
+
+To have it start without you, Task Scheduler → Create Task → *Run whether
+the user is logged on or not* → Action: `tools\local_sync.cmd`.
+
+**On Linux**, as a user service that restarts itself:
 
 ```ini
 # ~/.config/systemd/user/market-replicate.service
@@ -140,11 +179,10 @@ systemctl --user enable --now market-replicate
 journalctl --user -u market-replicate -f
 ```
 
-On Windows, Task Scheduler with "run whether the user is logged on or
-not", action `python.exe tools\replicate.py --loop 10`.
-
-A connection error is logged and the next pass retries — Render's free
-instance sleeps, and that is an expected event, not a reason to stop. The
+A connection error is logged and the next pass retries. Not because the
+database sleeps — Render spins down free *web services*, not free
+databases — but because a long connection over the public internet drops
+sooner or later, and a laptop lid closes. The
 watermark lives in the **target**, so a pass that is lost costs nothing:
 the next one picks up exactly where the last successful one stopped.
 

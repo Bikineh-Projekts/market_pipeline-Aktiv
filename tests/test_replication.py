@@ -235,12 +235,58 @@ def test_running_it_again_changes_nothing(pipeline, target):
 
 
 def test_a_full_pass_is_also_idempotent(pipeline, target):
-    """--full re-reads every row; it must still not duplicate any."""
+    """
+    --full re-reads every row; it must still not duplicate any.
+
+    This used to check fact_market_timeseries alone, and passed while
+    --full was doubling log_api_call every time it ran -- 39 rows to 78 to
+    117. fact_market_timeseries has a unique constraint, so ON CONFLICT
+    absorbed the second read and the property looked proven; log_api_call
+    has none, which is the only case where the question was interesting.
+    So: every table, named by the code rather than by hand, so a table
+    added later is covered without anyone remembering to add it here.
+    """
     pipeline.run.main(["--full", "--trigger", "test"])
     _replicate()
-    before = _scalar(target, "SELECT COUNT(*) FROM fact_market_timeseries")
+
+    tables = [f.table for f in replicate.FACTS] + [d.table for d in replicate.DIMENSIONS]
+    before = {t: _scalar(target, f"SELECT COUNT(*) FROM {t}") for t in tables}
+    assert before["log_api_call"] > 0, "nothing was logged; the test proves nothing"
+
     _replicate(full=True)
-    assert _scalar(target, "SELECT COUNT(*) FROM fact_market_timeseries") == before
+    _replicate(full=True)
+
+    after = {t: _scalar(target, f"SELECT COUNT(*) FROM {t}") for t in tables}
+    grew = {t: (before[t], after[t]) for t in tables if after[t] != before[t]}
+    assert not grew, f"--full duplicated rows: {grew}"
+
+
+def test_full_is_refused_rather_than_guessed_when_the_watermark_is_lost(
+        pipeline, target):
+    """
+    Rows present, watermark gone: the one case --full cannot recover.
+
+    There is no way to tell which source rows a table without a unique key
+    already holds, so the choice is between guessing and saying so. It says
+    so, and names the way out -- a silent doubling of the api log would
+    surface much later as a wrong success rate in Power BI, not as an error.
+    """
+    pipeline.run.main(["--full", "--trigger", "test"])
+    _replicate()
+    before = _scalar(target, "SELECT COUNT(*) FROM log_api_call")
+    assert before > 0
+
+    with target.cursor() as cur:
+        cur.execute("DELETE FROM replication_state WHERE table_name = 'log_api_call'")
+
+    _replicate(full=True)
+    assert _scalar(target, "SELECT COUNT(*) FROM log_api_call") == before
+
+    # And the recovery the warning names actually works.
+    with target.cursor() as cur:
+        cur.execute("TRUNCATE log_api_call")
+    _replicate(full=True)
+    assert _scalar(target, "SELECT COUNT(*) FROM log_api_call") == before
 
 
 def test_the_grain_survives_replication(pipeline, target):
