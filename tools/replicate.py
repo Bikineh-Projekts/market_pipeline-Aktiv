@@ -59,6 +59,8 @@ import logging
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -539,6 +541,61 @@ def _label(url: str) -> str:
         return "?"
 
 
+# ---------------------------------------------------------------------
+# KEEPING THE DASHBOARD AWAKE
+#
+# A free Render WEB SERVICE spins down after 15 minutes without traffic
+# and takes about a minute to wake. The DATABASE does not: Render's free
+# plan spins down web services only, so nothing below affects whether the
+# data keeps flowing. This is about the status page loading quickly.
+#
+# There is a keepalive workflow in GitHub Actions that does the same job,
+# and this exists because that one cannot be relied on: GitHub states
+# plainly that scheduled runs are best-effort and may be delayed or
+# dropped under load, and on this repository most of them are. A loop
+# already running on your own machine is not best-effort.
+#
+# TWO LIMITS SHAPE THIS, and ignoring either one costs money:
+#
+#   750 instance-hours per month on the free plan. A service kept awake
+#   around the clock uses about 744 -- the whole allowance for one
+#   service, with nothing left over. So pinging is confined to a daytime
+#   window (~465 hours/month), the same one the workflow uses.
+#
+#   --loop 1 means 86,400 passes a day. A ping on each would be pointless
+#   as well as rude: 15 minutes of silence is what spins the service
+#   down, so once every 10 minutes is enough to prevent it, whatever the
+#   loop interval.
+# ---------------------------------------------------------------------
+PING_EVERY_SECONDS = 600
+PING_HOURS_UTC = range(6, 21)
+
+
+class KeepAwake:
+    """Pings a URL occasionally. Never raises, never fails a pass."""
+
+    def __init__(self, url: str):
+        self.url = url.rstrip("/")
+        self._last = 0.0
+
+    def maybe_ping(self, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        if datetime.now(timezone.utc).hour not in PING_HOURS_UTC:
+            return False
+        if now - self._last < PING_EVERY_SECONDS:
+            return False
+        self._last = now
+        try:
+            with urllib.request.urlopen(f"{self.url}/health", timeout=20) as r:
+                log.debug("keep-awake: %s returned %s", self.url, r.status)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            # Waking a sleeping instance regularly takes longer than the
+            # timeout, and the request that timed out still woke it. A
+            # failure here is never a reason to stop replicating.
+            log.debug("keep-awake: %s", exc)
+        return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Copy rows from one copy of this schema to another.",
@@ -556,6 +613,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="rows per round trip (default 5000)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be copied, write nothing")
+    ap.add_argument("--keep-awake", metavar="URL",
+                    default=os.getenv("DASHBOARD_URL", ""),
+                    help="with --loop, also ping this dashboard every 10 min "
+                         "during the day so it does not spin down "
+                         "(default: $DASHBOARD_URL)")
     args = ap.parse_args(argv)
 
     if not args.source or not args.target:
@@ -577,10 +639,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         log.info("dry run: nothing will be written")
 
+    keep_awake = None
+    if args.keep_awake:
+        if not args.loop:
+            log.info("--keep-awake needs --loop; ignoring it for a single pass")
+        else:
+            keep_awake = KeepAwake(args.keep_awake)
+            log.info("awake   %s every %d min, %02d:00-%02d:59 UTC",
+                     keep_awake.url, PING_EVERY_SECONDS // 60,
+                     PING_HOURS_UTC[0], PING_HOURS_UTC[-1])
+
     full = args.full
     passes = 0
     while True:
         started = time.perf_counter()
+        if keep_awake is not None:
+            keep_awake.maybe_ping()
         try:
             totals = one_pass(args.source, args.target, batch=args.batch,
                               dry_run=args.dry_run, full=full,
@@ -588,11 +662,12 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit:
             raise
         except Exception as exc:
-            # A loop must survive the source going away: Render's free
-            # instance sleeps, and a dropped connection is an expected
-            # event, not a reason to stop replicating for the rest of the
-            # day. One pass is lost; the next one catches up, because the
-            # watermark is stored in the target.
+            # A loop must survive the source going away. Not because the
+            # database sleeps -- Render spins down free WEB SERVICES, not
+            # free databases -- but because a long-running connection over
+            # the public internet drops sooner or later, and a laptop lid
+            # closes. One pass is lost; the next catches up, because the
+            # watermark is stored in the target, not held in memory here.
             log.error("pass failed: %s", exc)
             if not args.loop:
                 return 1
