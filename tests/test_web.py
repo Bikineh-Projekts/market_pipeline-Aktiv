@@ -246,3 +246,65 @@ def test_ssl_is_not_forced_on_a_local_database(monkeypatch):
     importlib.reload(webdb)
     assert "sslmode" not in webdb.database_url()
 
+
+
+# ------------------------------------------------- a fresh install is not broken
+def test_a_migrated_but_never_run_database_is_not_alarming(monkeypatch, database):
+    """
+    What a person sees immediately after a successful first deploy. The
+    tables exist and nothing has collected yet, which is not a failure --
+    showing it in alarm red says something is wrong when nothing is.
+    """
+    import re
+
+    from tests.conftest import TEST_URL
+    monkeypatch.setenv("DATABASE_URL", TEST_URL)
+    from web import db as webdb
+    importlib.reload(webdb)
+    from web import app as webapp
+    importlib.reload(webapp)
+    webdb.close_pool()
+
+    client = webapp.create_app().test_client()
+    try:
+        html = client.get("/").data.decode()
+        payload = client.get("/api/status").get_json()
+
+        assert payload["state"] == "not started"
+        assert "Run the ETL workflow" in payload["reason"], (
+            "an empty dashboard should say what to do next")
+
+        # Neutral, not red.
+        assert re.search(r'class="word idle"', html), "headline should be muted"
+        assert re.search(r'class="fill idle"', html), "bar should be muted"
+
+        # An empty freshness bar, not a full one.
+        pct = float(re.search(r"--pct: ([\d.]+)%", html).group(1))
+        assert pct == 0.0, f"never-run pipeline showed {pct}% of the staleness budget used"
+        assert "waiting for the first run" in html
+    finally:
+        webdb.close_pool()
+
+
+def test_once_a_run_exists_an_empty_database_is_a_warning(pipeline, monkeypatch):
+    """A run that stored nothing IS a problem, unlike never having run."""
+    import re
+
+    pipeline.db.open_run("r-empty", "test", 3)
+
+    from tests.conftest import TEST_URL
+    monkeypatch.setenv("DATABASE_URL", TEST_URL)
+    from web import db as webdb
+    importlib.reload(webdb)
+    from web import app as webapp
+    importlib.reload(webapp)
+    webdb.close_pool()
+
+    client = webapp.create_app().test_client()
+    try:
+        html = client.get("/").data.decode()
+        assert client.get("/api/status").get_json()["state"] == "no data"
+        assert re.search(r'class="word (bad|warn)"', html), (
+            "a run that collected nothing should not look neutral")
+    finally:
+        webdb.close_pool()

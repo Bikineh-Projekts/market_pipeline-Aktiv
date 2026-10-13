@@ -96,15 +96,27 @@ def _clean(rows: list[dict]) -> list[dict]:
 
 
 def _overall_state(health: dict | None, last_run: dict | None) -> tuple[str, str]:
-    """A single word for the banner, plus why."""
+    """
+    A single word for the banner, plus why.
+
+    "Not started" is kept separate from "stale" on purpose. A database that
+    has been migrated but never collected anything is not broken, and
+    showing it in alarm red says something is wrong when nothing is -- the
+    first thing anyone sees after a successful deploy should not look like
+    a failure. It says what to do instead.
+    """
     if not health:
         return "unknown", "no data in the database yet"
 
     age = health.get("quote_age_minutes")
     limit = float(os.getenv("MAX_QUOTE_AGE_MIN", "90"))
 
+    if age is None and not last_run:
+        return ("not started",
+                "the tables are ready and nothing has been collected yet. "
+                "Run the ETL workflow in GitHub Actions to begin")
     if age is None:
-        return "no data", "no quotes have been collected yet"
+        return "no data", "runs have happened but no quote was stored"
     if float(age) > limit:
         return "stale", f"the newest quote is {int(float(age))} minutes old"
     if last_run and last_run.get("status") == "failed":
@@ -179,15 +191,30 @@ def _register_filters(app: Flask) -> None:
         return f"{float(value):+.2f}%"
 
     @app.template_filter("budget_pct")
-    def _budget_pct(age_minutes, limit):
-        """How much of the staleness allowance is used, capped at 100."""
-        if age_minutes is None or not limit:
+    def _budget_pct(age_minutes, limit, started=True):
+        """
+        How much of the staleness allowance is used, capped at 100.
+
+        A pipeline that has never run gets 0, not 100: a full red bar reads
+        as "critically overdue" when the truth is "nothing has happened
+        yet".
+        """
+        if age_minutes is None:
+            return 100.0 if started else 0.0
+        if not limit:
             return 100.0
         return max(0.0, min(100.0, float(age_minutes) / float(limit) * 100.0))
 
     @app.template_filter("tone")
     def _tone(state):
-        return {"healthy": "ok", "degraded": "warn", "stale": "warn"}.get(state, "bad")
+        return {
+            "healthy": "ok",
+            "degraded": "warn",
+            "stale": "warn",
+            # Nothing is wrong yet, so nothing should be red.
+            "not started": "idle",
+            "unknown": "idle",
+        }.get(state, "bad")
 
     @app.template_filter("run_tone")
     def _run_tone(status):
