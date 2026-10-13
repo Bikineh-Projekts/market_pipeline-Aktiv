@@ -222,7 +222,22 @@ jobs:
 
           SIZE=$(psql "$ADMIN_URL" -tAc "SELECT pg_size_pretty(pg_database_size(current_database()));")
 
+          # Data quality, not just row counts. A table full of rows whose
+          # company_name is NULL still shows "UNKNOWN" in every Power BI
+          # slicer, which is the failure this project actually had.
+          QUALITY=$(psql "$ADMIN_URL" -tAc "
+            SELECT 'named=' || COUNT(*) FILTER (WHERE company_name IS NOT NULL)
+                || '/' || COUNT(*)
+                || '  sectors=' || COUNT(*) FILTER (WHERE sector IS NOT NULL)
+                || '/' || COUNT(*)
+            FROM dim_symbol;")
+
+          SAMPLE=$(psql "$ADMIN_URL" -tAc "
+            SELECT string_agg(symbol_code || '=' || COALESCE(company_name,'NULL'), '  ' ORDER BY symbol_code)
+            FROM dim_symbol;")
+
           echo "::notice title=Database contents::$COUNTS"
+          echo "::notice title=Symbol profiles::$QUALITY  ·  $SAMPLE"
           echo "::notice title=Freshness::$FRESH  ·  size $SIZE"
 
           {
