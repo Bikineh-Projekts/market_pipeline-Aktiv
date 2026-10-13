@@ -19,8 +19,72 @@
 --      quote fetched at 23:30 UTC belongs to the next Berlin day, and
 --      filing it under the UTC day puts it in the wrong bucket every night.
 --
--- Run once:  psql "$DATABASE_URL" -f sql/01_powerbi_star.sql
+-- Re-run any time:  psql "$DATABASE_URL" -f sql/02_bi_views.sql
 -- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- REPLACE, NOT "CREATE OR REPLACE"
+--
+-- CREATE OR REPLACE VIEW keeps the existing column list. It can append a
+-- column at the end and nothing else: rename one, reorder them, change a
+-- type, and it refuses with
+--
+--     ERROR:  cannot change name of view column "hour_utc" to "trade_date"
+--
+-- which is exactly what happened when the views grew their _utc/_local
+-- pairs. The whole file then aborted at the seventh view, so `migrate`
+-- failed against the live database while passing CI -- CI builds a FRESH
+-- database every run, where there is no old view to collide with, so no
+-- test could see it. test_bi_views.py now plants a wrong-shaped view first.
+--
+-- Dropping first is what makes this file an upgrade rather than a patch.
+-- Everything runs in one transaction, so a failure anywhere leaves the old
+-- views in place rather than a half-migrated schema with views missing.
+-- ---------------------------------------------------------------------
+BEGIN;
+
+DO $$
+DECLARE
+    outsiders TEXT;
+    v         RECORD;
+BEGIN
+    -- Anything outside this file that was built ON one of these views -- a
+    -- view or materialized view someone added in pgAdmin, say. Dropping
+    -- with CASCADE would delete it without a word, so stop and name it
+    -- instead. The bi_ views themselves are excluded: this file recreates
+    -- every one of them a few lines further down.
+    SELECT string_agg(DISTINCT dependent.relname, ', ')
+      INTO outsiders
+      FROM pg_depend      d
+      JOIN pg_rewrite     r          ON r.oid = d.objid
+      JOIN pg_class       dependent  ON dependent.oid = r.ev_class
+      JOIN pg_class       referenced ON referenced.oid = d.refobjid
+      JOIN pg_namespace   n          ON n.oid = referenced.relnamespace
+     WHERE d.classid     = 'pg_rewrite'::regclass
+       AND d.refclassid  = 'pg_class'::regclass
+       AND n.nspname     = 'public'
+       AND referenced.relname LIKE 'bi\_%'
+       AND dependent.relname NOT LIKE 'bi\_%'
+       AND dependent.relname <> referenced.relname;
+
+    IF outsiders IS NOT NULL THEN
+        RAISE EXCEPTION
+            'These objects depend on the bi_ views and would be destroyed: %',
+            outsiders
+          USING HINT = 'Drop or re-point them, then run this file again.';
+    END IF;
+
+    FOR v IN SELECT table_name
+               FROM information_schema.views
+              WHERE table_schema = 'public'
+                AND table_name LIKE 'bi\_%'
+    LOOP
+        -- CASCADE covers one bi_ view built on another. None are today,
+        -- but the drop order is alphabetical, which is not a dependency
+        -- order, and the first such view would otherwise break migrate.
+        EXECUTE format('DROP VIEW IF EXISTS %I CASCADE', v.table_name);
+    END LOOP;
+END $$;
 
 -- ---------------------------------------------------------------------
 -- DIMENSION: DATE
@@ -539,8 +603,9 @@ FROM log_pipeline_run r;
 
 
 -- ---------------------------------------------------------------------
--- STORAGE WATCH -- Neon free plan caps a project at 0.5 GB.
--- Check this occasionally so a full disk never surprises you.
+-- STORAGE WATCH -- every free database plan caps storage (Render's free
+-- Postgres at 1 GB). Check this occasionally so a full disk never
+-- surprises you; `Database -> verify` prints the same number.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_storage_usage AS
 SELECT
@@ -553,3 +618,5 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
   AND c.relkind = 'r';
+
+COMMIT;
