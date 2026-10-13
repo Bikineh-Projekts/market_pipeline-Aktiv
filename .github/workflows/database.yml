@@ -15,15 +15,17 @@ name: Database
 #               table, candles per year, and which calendar years are
 #               empty. Run this when a report shows unexpected years.
 #               Read-only.
-#     reset     drop only the bi_* views and rebuild them. Data untouched.
+#     reset     rebuild the bi_* views from scratch. Same as migrate for
+#               the views; data and tables untouched.
 #
 # Pooled vs direct endpoint:
-# Neon's pooled endpoint (the hostname containing "-pooler") runs PgBouncer
-# in transaction mode, where SET, temporary tables and SQL-level PREPARE
-# are unavailable. Neon recommends a direct connection for migrations and
-# admin work, so every step here uses ADMIN_URL, the direct endpoint.
-# If you only set DATABASE_URL, this workflow derives the direct URL by
-# stripping "-pooler" -- no second secret required.
+# Render's external URL is a direct connection, so on Render this is a
+# no-op and ADMIN_URL is simply DATABASE_URL. It matters on a provider
+# that hands out a pooled hostname (Neon's contains "-pooler", and runs
+# PgBouncer in transaction mode, where SET, temporary tables and SQL-level
+# PREPARE are unavailable -- none of which a migration can do without).
+# This workflow derives the direct URL by stripping "-pooler", so moving
+# the database to such a provider needs no second secret.
 # ---------------------------------------------------------------------
 on:
   workflow_dispatch:
@@ -121,21 +123,16 @@ jobs:
           psql "$ADMIN_URL" -tAc \
             "SELECT 'connected to ' || current_database() || ' as ' || current_user;"
 
-      - name: Drop BI views
-        if: inputs.action == 'reset'
-        run: |
-          psql "$ADMIN_URL" -v ON_ERROR_STOP=1 <<'SQL'
-          DO $$
-          DECLARE v RECORD;
-          BEGIN
-            FOR v IN SELECT table_name FROM information_schema.views
-                      WHERE table_schema = 'public' AND table_name LIKE 'bi\_%'
-            LOOP
-              EXECUTE format('DROP VIEW IF EXISTS %I CASCADE', v.table_name);
-            END LOOP;
-          END $$;
-          SQL
-          echo "Views dropped. Tables and data untouched."
+      # There used to be a separate "Drop BI views" step here, for `reset`
+      # only. 02_bi_views.sql now drops and rebuilds the views every time
+      # it runs -- CREATE OR REPLACE VIEW cannot rename a view's columns,
+      # so without that, any change to a view's shape failed against a
+      # database that already had the old one. That makes `reset` and
+      # `migrate` do the same thing to the views, and the step redundant.
+      #
+      # Removing it also closed a real gap: that step CASCADEd, so `reset`
+      # would silently delete a view someone had built on top of a bi_ one
+      # in pgAdmin. The file's own drop refuses and names it instead.
 
       - name: Apply schema and views
         if: >-
