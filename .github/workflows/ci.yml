@@ -61,7 +61,45 @@ jobs:
         run: pip install -r requirements-dev.txt -r requirements-web.txt
 
       - name: Run the test suite
-        run: python -m pytest -v
+        run: |
+          # tee + a separate verdict step so failures become annotations.
+          # The raw log takes several clicks to reach and is not always
+          # retrievable through the API, which made a red run opaque.
+          set +e
+          python -m pytest -v --tb=short 2>&1 | tee /tmp/pytest.log
+          set -e
+          python tools/annotate_pytest.py /tmp/pytest.log
+
+      - name: Environment, when the suite failed
+        if: failure()
+        run: |
+          echo "python: $(python -V)"
+          echo "pytest: $(python -m pytest --version 2>&1 | head -1)"
+          python -c "import psycopg2; print('psycopg2:', psycopg2.__version__)"
+          echo "--- can the test database be reached? ---"
+          python - <<'PY'
+          import os, psycopg2
+          url = os.environ["TEST_DATABASE_URL"]
+          try:
+              conn = psycopg2.connect(url, connect_timeout=10)
+              with conn.cursor() as cur:
+                  cur.execute("SELECT version()")
+                  print("connected:", cur.fetchone()[0][:60])
+              conn.close()
+          except Exception as exc:
+              print(f"::error::cannot reach the test database: {exc}")
+          PY
+          echo "--- last 60 lines of the pytest log ---"
+          tail -60 /tmp/pytest.log || echo "(no log was written)"
+
+      - name: Keep the pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.run_id }}
+          path: /tmp/pytest.log
+          retention-days: 7
+          if-no-files-found: warn
 
   lint:
     runs-on: ubuntu-latest
