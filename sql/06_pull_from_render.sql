@@ -53,16 +53,21 @@ CREATE EXTENSION IF NOT EXISTS postgres_fdw;
 -- values, not the internal ones: the internal hostname resolves only
 -- inside Render, and from your machine it simply does not exist.
 --
--- Replace the four quoted values marked CHANGE ME. Keep the quotes.
+-- Only TWO values actually need changing: the hostname and the password.
+-- dbname and user below already match this project's Render database
+-- (market_db_aktiv / market_db_aktiv_user); change them only if yours
+-- differ. Keep the quotes on everything.
 -- =====================================================================
 DROP SERVER IF EXISTS render_src CASCADE;
 
 CREATE SERVER render_src
     FOREIGN DATA WRAPPER postgres_fdw
     OPTIONS (
-        host    'dpg-xxxxxxxxxxxxxxxx-a.frankfurt-postgres.render.com',  -- CHANGE ME: Hostname
+        -- pgAdmin: right-click the Render server -> Properties ->
+        -- Connection -> "Host name/address". Or Render -> Connections.
+        host    'dpg-xxxxxxxxxxxxxxxx-a.frankfurt-postgres.render.com',  -- CHANGE ME  <-- 1 of 2
         port    '5432',
-        dbname  'market_db_aktiv',                                       -- CHANGE ME: Database
+        dbname  'market_db_aktiv',           -- already correct
         -- Not optional. Render refuses a connection without SSL, and the
         -- refusal reads as "server closed the connection unexpectedly",
         -- which says nothing about SSL and sends you looking elsewhere.
@@ -74,8 +79,8 @@ CREATE SERVER render_src
 CREATE USER MAPPING FOR CURRENT_USER
     SERVER render_src
     OPTIONS (
-        user     'market_db_aktiv_user',     -- CHANGE ME: Username
-        password 'PASTE_THE_PASSWORD_HERE'   -- CHANGE ME: Password
+        user     'market_db_aktiv_user',     -- already correct
+        password 'PASTE_THE_PASSWORD_HERE'   -- CHANGE ME  <-- 2 of 2
     );
 
 CREATE SCHEMA IF NOT EXISTS render;
@@ -487,6 +492,80 @@ SELECT
     ROUND(EXTRACT(EPOCH FROM (NOW() - s.last_run_utc)) / 60.0, 1)
                                                            AS minutes_since_pull
 FROM render_sync_state s;
+
+
+-- =====================================================================
+-- STEP 5b  Preflight
+--
+-- Every INSERT below says ON CONFLICT (...), and PostgreSQL can only
+-- honour that if a UNIQUE constraint covers exactly those columns. Your
+-- tables were created by hand from an earlier copy of 01_schema.sql, so
+-- one may be missing -- and the error you would get is
+--
+--     there is no unique or exclusion constraint matching the
+--     ON CONFLICT specification
+--
+-- which names neither the table nor the columns and leaves you nowhere.
+-- This names both, and gives you the line that fixes it.
+--
+-- It only reports. Adding the constraint itself could fail on data
+-- already duplicated, and silently deleting rows to force it through is
+-- not a thing a setup script should do behind your back.
+-- =====================================================================
+DO $preflight$
+DECLARE
+    want   RECORD;
+    missed TEXT := '';
+BEGIN
+    FOR want IN
+        SELECT * FROM (VALUES
+            ('fact_market_quote',        ARRAY['quote_time_utc','source_id','symbol_id'],
+             'uq_fact_quote',       'symbol_id, source_id, quote_time_utc'),
+            ('fact_market_timeseries',   ARRAY['candle_time_utc','interval_id','symbol_id'],
+             'uq_fact_timeseries',  'symbol_id, interval_id, candle_time_utc'),
+            ('fact_market_indicator',    ARRAY['candle_time_utc','indicator_id','interval_id','symbol_id'],
+             'uq_fact_indicator',   'symbol_id, indicator_id, interval_id, candle_time_utc'),
+            ('fact_company_fundamental', ARRAY['fetched_date','source_id','symbol_id'],
+             'uq_fact_fundamental', 'symbol_id, source_id, fetched_date'),
+            ('fact_earnings_calendar',   ARRAY['report_date','symbol_id'],
+             'uq_fact_earnings',    'symbol_id, report_date'),
+            ('log_pipeline_run',         ARRAY['run_uid'],
+             'uq_run_uid',          'run_uid')
+        ) AS v(tbl, cols, suggested_name, col_list)
+    LOOP
+        IF to_regclass('public.' || want.tbl) IS NULL THEN
+            missed := missed || format(
+                E'\n  table %s does not exist. Run sql/01_schema.sql first.', want.tbl);
+            CONTINUE;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+              FROM pg_constraint c
+             WHERE c.conrelid = ('public.' || want.tbl)::regclass
+               AND c.contype IN ('u', 'p')
+               AND (SELECT array_agg(a.attname::text ORDER BY a.attname)
+                      FROM unnest(c.conkey) k
+                      JOIN pg_attribute a ON a.attrelid = c.conrelid
+                                         AND a.attnum   = k)
+                   = (SELECT array_agg(x ORDER BY x) FROM unnest(want.cols) x)
+        ) THEN
+            missed := missed || format(
+                E'\n  ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);',
+                want.tbl, want.suggested_name, want.col_list);
+        END IF;
+    END LOOP;
+
+    IF missed <> '' THEN
+        RAISE EXCEPTION
+            E'This database is missing constraints the pull needs.\n'
+            -- RAISE's placeholder is %, not %s -- format() uses %s, RAISE
+            -- does not, and writing %s here printed a stray 's'.
+            'Run these, then run this file again:%', missed;
+    END IF;
+
+    RAISE NOTICE 'Preflight passed: every constraint the pull needs is present.';
+END $preflight$;
 
 
 -- =====================================================================
