@@ -141,6 +141,16 @@ def pipeline(provider, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", TEST_URL)
     monkeypatch.setenv("SYMBOLS", "AAPL,MSFT")
     monkeypatch.setenv("STATUS_FILE", "/dev/null")
+
+    # The suite must behave the same inside CI as it does on a laptop.
+    # GitHub Actions sets these, and config derives run_uid from them, so
+    # every run started within one workflow run shares a uid. That is
+    # correct in production -- one workflow run is one pipeline run -- but
+    # it made a test that starts four runs see a single log row, and only
+    # ever when it ran in CI.
+    for inherited in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUN_TRIGGER",
+                      "GITHUB_ACTIONS", "CI"):
+        monkeypatch.delenv(inherited, raising=False)
     for var in ("FINNHUB_API_KEY", "ALPHAVANTAGE_API_KEY", "TWELVEDATA_API_KEY"):
         monkeypatch.setenv(var, "test-key")
     # No real waiting in tests.
