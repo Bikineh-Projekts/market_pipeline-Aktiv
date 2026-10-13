@@ -109,7 +109,8 @@ class Fact:
     # never copied.
     fks: dict[str, str] = field(default_factory=dict)
     # ON CONFLICT target. None means the table has no unique constraint, so
-    # duplicate protection falls to the watermark plus a NOT EXISTS guard.
+    # the watermark is the ONLY thing preventing duplicates -- which is why
+    # sync_fact refuses to honour --full for such a table.
     conflict: tuple[str, ...] | None = None
     # Re-read this many rows below the watermark on every pass, so a row
     # updated in place after it was first copied is picked up again.
@@ -386,7 +387,31 @@ def sync_fact(source, target, fact: Fact, maps: dict[str, dict[int, int]],
               source_label: str, full: bool,
               jsonb: set[str] | None = None) -> tuple[int, int]:
     """Copy new rows of one fact table. Returns (read, written)."""
-    watermark = 0 if full else max(0, state.get(fact.table, 0) - fact.overlap)
+    if full and fact.conflict is None:
+        # --full works by re-reading from zero and letting ON CONFLICT make
+        # the repeat harmless. This table has no unique constraint to
+        # conflict on, so a second read inserts every row a SECOND TIME --
+        # measured: 39 api-call rows became 78, and the dashboard's success
+        # rate and the Power BI api view are computed from them.
+        #
+        # So --full is ignored here and the stored watermark stands. The
+        # one case that cannot be recovered this way is a target that holds
+        # rows while the state row that says how far it got has been lost;
+        # that is reported rather than guessed at, because guessing wrong
+        # means silent duplicates.
+        watermark = state.get(fact.table, 0)
+        if watermark == 0:
+            with target.cursor() as cur:
+                cur.execute(f"SELECT EXISTS (SELECT 1 FROM {fact.table})")
+                if cur.fetchone()[0]:
+                    log.warning(
+                        "%-26s skipped: --full would duplicate it. %s has no "
+                        "unique key and no watermark is stored. To rebuild it: "
+                        "TRUNCATE %s, then run again.",
+                        fact.table, fact.table, fact.table)
+                    return 0, 0
+    else:
+        watermark = 0 if full else max(0, state.get(fact.table, 0) - fact.overlap)
     cols = ", ".join(fact.columns)
     placeholders = ", ".join(["%s"] * len(fact.columns))
     read = written = 0
