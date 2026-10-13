@@ -67,6 +67,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           STORAGE_CAP_MB: ${{ vars.STORAGE_CAP_MB || '512' }}
+          DB_EXPIRES_AT: ${{ vars.DB_EXPIRES_AT }}
         run: |
           npm install --no-audit --no-fund
           node monitor.mjs
