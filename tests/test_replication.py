@@ -19,6 +19,7 @@ than by id.
 
 from __future__ import annotations
 
+import datetime
 import pathlib
 import sys
 
@@ -29,6 +30,19 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from tests.conftest import TEST_URL  # noqa: E402
+from tools import replicate  # noqa: E402
+
+
+class _FakeResponse:
+    """Just enough of urlopen's context manager for the keep-awake tests."""
+
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 TARGET_URL = TEST_URL.replace("/market_pipeline_test", "/market_pipeline_test_target")
 TARGET_DB = "market_pipeline_test_target"
@@ -375,3 +389,61 @@ def test_sequences_are_left_above_the_data(pipeline, target):
          WHERE last_value < hi
     """)
     assert behind == 0
+
+
+# ---------------------------------------------------------------------
+# KEEP-AWAKE
+#
+# A free Render web service spins down after 15 minutes idle. These check
+# the throttle, because getting it wrong is expensive rather than merely
+# broken: the free plan allows 750 instance-hours a month and a service
+# kept awake around the clock spends about 744 of them.
+# ---------------------------------------------------------------------
+def test_the_ping_is_throttled_to_once_every_ten_minutes(monkeypatch):
+    """--loop 1 must not mean 86,400 requests a day."""
+    calls = []
+    monkeypatch.setattr(replicate.urllib.request, "urlopen",
+                        lambda url, timeout=0: calls.append(url) or _FakeResponse())
+    monkeypatch.setattr(replicate, "PING_HOURS_UTC", range(0, 24))
+
+    keeper = replicate.KeepAwake("https://example.invalid")
+    start = 1_000_000.0
+    for second in range(0, 1800):            # half an hour of one-second passes
+        keeper.maybe_ping(now=start + second)
+
+    assert len(calls) == 3, f"expected a ping every 10 min, got {len(calls)}"
+    assert calls[0].endswith("/health")
+
+
+def test_no_pings_outside_the_daytime_window(monkeypatch):
+    """Overnight hours would spend the monthly allowance for nothing."""
+    calls = []
+    monkeypatch.setattr(replicate.urllib.request, "urlopen",
+                        lambda url, timeout=0: calls.append(url) or _FakeResponse())
+    monkeypatch.setattr(replicate, "PING_HOURS_UTC", range(6, 21))
+
+    class _Night(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 13, 3, 0, tzinfo=tz)
+
+    monkeypatch.setattr(replicate, "datetime", _Night)
+    assert replicate.KeepAwake("https://example.invalid").maybe_ping() is False
+    assert calls == []
+
+
+def test_an_unreachable_dashboard_does_not_stop_replication(monkeypatch):
+    """
+    The ping is a courtesy, not a dependency.
+
+    Waking a spun-down instance regularly takes longer than the timeout --
+    and the request that timed out is the one that woke it. Raising here
+    would end the replication loop over a status page.
+    """
+    def explode(url, timeout=0):
+        raise OSError("connection reset by peer")
+
+    monkeypatch.setattr(replicate.urllib.request, "urlopen", explode)
+    monkeypatch.setattr(replicate, "PING_HOURS_UTC", range(0, 24))
+
+    assert replicate.KeepAwake("https://example.invalid").maybe_ping() is True

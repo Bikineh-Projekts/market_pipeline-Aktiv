@@ -87,10 +87,32 @@ python tools/replicate.py --once
 
 # keep it current, forever
 python tools/replicate.py --loop 10
+
+# ...and keep the dashboard from spinning down while you are at it
+python tools/replicate.py --loop 10 \
+    --keep-awake https://market-pipeline-aktiv.onrender.com
 ```
 
 Running it again never duplicates anything, so there is no harm in
 stopping and starting it, or running it twice by accident.
+
+**On `--keep-awake`.** A free Render *web service* spins down after 15
+minutes without traffic and takes about a minute to wake up again. The
+*database* does not — Render's free plan spins down web services only — so
+this changes nothing about whether your data keeps flowing. It is about
+the status page opening instantly instead of after a minute.
+
+There is a keepalive workflow in GitHub Actions doing the same job, and
+this option exists because that one cannot be depended on: GitHub says
+plainly that scheduled runs are best effort and may be delayed or dropped,
+and on this repository most of them are dropped. A loop already running on
+your own machine is not best effort.
+
+It pings once every 10 minutes, and only between 06:00 and 20:59 UTC. Both
+limits are deliberate. The free plan allows **750 instance-hours a month**,
+and a service kept awake around the clock spends about 744 of them — the
+entire allowance, for a page nobody is reading at 04:00. The daytime window
+costs about 465.
 
 ### 4. Leave it running
 
