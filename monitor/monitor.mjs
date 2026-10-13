@@ -17,7 +17,8 @@
  *   DATABASE_URL          optional Postgres connection string
  *   OR PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD/PGSSLMODE
  *   MAX_QUOTE_AGE_MIN     freshness threshold, default 90
- *   STORAGE_CAP_MB        hosting storage cap, default 512 (Neon free)
+ *   STORAGE_CAP_MB        hosting storage cap, default 512
+ *   DB_EXPIRES_AT         YYYY-MM-DD the hosted database expires, if it does
  *   MIN_SUCCESS_RATE      API success-rate threshold in %, default 80
  *   ALERT_WEBHOOK_URL     optional Slack/Discord/Telegram-compatible webhook
  */
@@ -52,6 +53,10 @@ const CONFIG = {
   webhook: process.env.ALERT_WEBHOOK_URL || null,
   // Neon free plan caps a project at 0.5 GB.
   storageCapMb: Number(process.env.STORAGE_CAP_MB ?? 512),
+  // A Render free Postgres is DELETED 30 days after creation (plus a
+  // 14-day grace period). Set DB_EXPIRES_AT to that date and this warns
+  // while there is still time to act.
+  expiresAt: process.env.DB_EXPIRES_AT || null,
 };
 
 // ---------------------------------------------------------------- colors
@@ -177,6 +182,29 @@ function buildChecks({ health, lastRun, runCounts, sources, staleSymbols, storag
         ? "could not read database size"
         : `${mb} MB of ${capMb} MB (${pct.toFixed(1)}%)`,
   });
+
+  // 0b. hosting expiry. Not a failure mode you can detect from the data:
+  // the database works perfectly right up until it is deleted.
+  if (CONFIG.expiresAt) {
+    const expiry = new Date(CONFIG.expiresAt);
+    if (Number.isNaN(expiry.getTime())) {
+      checks.push({
+        name: "Database expiry",
+        state: "WARN",
+        detail: `DB_EXPIRES_AT is not a date I can read: ${CONFIG.expiresAt}`,
+      });
+    } else {
+      const days = Math.floor((expiry - Date.now()) / 86400000);
+      checks.push({
+        name: "Database expiry",
+        state: days <= 7 ? "FAIL" : days <= 14 ? "WARN" : "OK",
+        detail:
+          days < 0
+            ? `expired ${Math.abs(days)} day(s) ago - restore from a backup now`
+            : `${days} day(s) left (${expiry.toISOString().slice(0, 10)})`,
+      });
+    }
+  }
 
   // 1. data freshness
   const age = num(health?.quote_age_minutes);

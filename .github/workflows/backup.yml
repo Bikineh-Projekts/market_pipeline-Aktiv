@@ -1,0 +1,141 @@
+name: Backup
+
+# ---------------------------------------------------------------------
+# Why this exists: a Render free Postgres database EXPIRES 30 days after
+# it is created. After a 14-day grace period Render deletes it, and the
+# data goes with it. That is not a sleep or a pause -- it is deletion.
+#
+# This job dumps the database to a GitHub Actions artifact every week, so
+# an expiry costs you a new database and a restore, not your history.
+#
+# Artifacts are kept for 90 days, which covers the 30-day lifetime plus
+# the grace period with room to spare.
+#
+# Restoring is one command; see docs/RENDER.md.
+# ---------------------------------------------------------------------
+on:
+  schedule:
+    # 04:10 UTC every Sunday. An odd minute on purpose: schedules on the
+    # hour are the most contended and get delayed the most.
+    - cron: "10 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      schema_only:
+        description: "Dump the structure only, without the rows"
+        type: boolean
+        default: false
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client 16
+        run: |
+          # The runner's default client can be older than the server, and
+          # pg_dump refuses to dump a newer server than itself.
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          pg_dump --version
+
+      - name: Resolve the connection string
+        run: |
+          if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_URL_DIRECT" ]; then
+            echo "::error title=Missing secret::DATABASE_URL is not set."
+            exit 1
+          fi
+
+          # A dump is a long single session, so use the direct endpoint when
+          # the configured one is pooled.
+          if [ -n "$DATABASE_URL_DIRECT" ]; then
+            DUMP_URL="$DATABASE_URL_DIRECT"
+          else
+            DUMP_URL=$(echo "$DATABASE_URL" | sed 's/-pooler\./\./')
+          fi
+
+          echo "::add-mask::$DUMP_URL"
+          echo "DUMP_URL=$DUMP_URL" >> "$GITHUB_ENV"
+
+      - name: Record what we are backing up
+        run: |
+          psql "$DUMP_URL" -P pager=off -c "
+            SELECT current_database() AS database,
+                   pg_size_pretty(pg_database_size(current_database())) AS size;"
+          psql "$DUMP_URL" -P pager=off -c "
+            SELECT 'dim_symbol' AS table_name, COUNT(*) FROM dim_symbol
+            UNION ALL SELECT 'fact_market_quote',      COUNT(*) FROM fact_market_quote
+            UNION ALL SELECT 'fact_market_timeseries', COUNT(*) FROM fact_market_timeseries
+            UNION ALL SELECT 'fact_market_indicator',  COUNT(*) FROM fact_market_indicator
+            UNION ALL SELECT 'log_pipeline_run',       COUNT(*) FROM log_pipeline_run
+            ORDER BY 1;"
+
+      - name: Dump
+        id: dump
+        run: |
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          FILE="market_pipeline-${STAMP}.dump"
+
+          FLAGS="--format=custom --compress=9 --no-owner --no-privileges --verbose"
+          if [ "${{ inputs.schema_only }}" = "true" ]; then
+            FLAGS="$FLAGS --schema-only"
+            FILE="market_pipeline-schema-${STAMP}.dump"
+          fi
+
+          # --no-owner and --no-privileges matter: the role names on a new
+          # Render database differ, and without these the restore fails on
+          # every ALTER ... OWNER TO line.
+          pg_dump "$DUMP_URL" $FLAGS --file="$FILE"
+
+          SIZE=$(du -h "$FILE" | cut -f1)
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          echo "Wrote $FILE ($SIZE)"
+
+      - name: Verify the dump is readable
+        run: |
+          # A dump that cannot be listed is not a backup. pg_restore --list
+          # parses the archive's table of contents without touching any
+          # database, so this proves the file is intact.
+          FILE="${{ steps.dump.outputs.file }}"
+          ENTRIES=$(pg_restore --list "$FILE" | grep -cE '^[0-9]+;' || true)
+          echo "archive contains $ENTRIES objects"
+          if [ "$ENTRIES" -lt 20 ]; then
+            echo "::error title=Dump looks wrong::only $ENTRIES objects; expected 11 tables, 16 views and their indexes."
+            exit 1
+          fi
+          pg_restore --list "$FILE" | grep -E 'TABLE DATA|VIEW' | head -30
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_id }}
+          path: ${{ steps.dump.outputs.file }}
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 0  # the dump is already compressed
+
+      - name: Where to find it
+        run: |
+          echo "Download it from the Artifacts section of this run:"
+          echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo ""
+          echo "To restore into a fresh database:"
+          echo "  pg_restore --no-owner --no-privileges --clean --if-exists \\"
+          echo "    --dbname \"\$NEW_DATABASE_URL\" market_pipeline-*.dump"
