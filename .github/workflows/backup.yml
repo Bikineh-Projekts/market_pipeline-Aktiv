@@ -145,14 +145,36 @@ jobs:
           # A dump that cannot be listed is not a backup. pg_restore --list
           # parses the archive's table of contents without touching any
           # database, so this proves the file is intact.
+          #
+          # It must be the SAME client that wrote the dump: an older
+          # pg_restore cannot read a newer archive format, and it fails by
+          # listing nothing rather than by erroring loudly -- which read as
+          # "the dump is empty" when the dump was fine.
           FILE="${{ steps.dump.outputs.file }}"
-          ENTRIES=$(pg_restore --list "$FILE" | grep -cE '^[0-9]+;' || true)
-          echo "archive contains $ENTRIES objects"
-          if [ "$ENTRIES" -lt 20 ]; then
-            echo "::error title=Dump looks wrong::only $ENTRIES objects; expected 11 tables, 16 views and their indexes."
+          PGRESTORE="${CLIENT_BIN:-/usr/bin}/pg_restore"
+          [ -x "$PGRESTORE" ] || PGRESTORE=pg_restore
+          "$PGRESTORE" --version
+
+          if ! "$PGRESTORE" --list "$FILE" > /tmp/toc.txt 2> /tmp/toc.err; then
+            echo "::error title=Cannot read the dump::$(tail -3 /tmp/toc.err | tr '\n' ' ' | cut -c1-300)"
+            cat /tmp/toc.err
             exit 1
           fi
-          pg_restore --list "$FILE" | grep -E 'TABLE DATA|VIEW' | head -30
+
+          ENTRIES=$(grep -cE '^[0-9]+;' /tmp/toc.txt || true)
+          TABLES=$(grep -cE '^[0-9]+;.* TABLE ' /tmp/toc.txt || true)
+          VIEWS=$(grep -cE '^[0-9]+;.* VIEW ' /tmp/toc.txt || true)
+
+          echo "archive contains $ENTRIES objects ($TABLES tables, $VIEWS views)"
+
+          if [ "$ENTRIES" -lt 20 ]; then
+            echo "::error title=Dump looks wrong::only $ENTRIES objects; expected 11 tables, 16 views and their indexes."
+            head -20 /tmp/toc.txt
+            exit 1
+          fi
+
+          echo "::notice title=Dump verified::$ENTRIES objects — $TABLES tables, $VIEWS views"
+          grep -E 'TABLE DATA|VIEW' /tmp/toc.txt | head -30
 
       - name: Upload
         uses: actions/upload-artifact@v4
