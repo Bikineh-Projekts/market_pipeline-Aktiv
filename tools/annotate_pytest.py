@@ -32,6 +32,18 @@ SUMMARY = re.compile(r"^=+\s*(.*?(?:passed|failed|error).*?)\s*=+$")
 ASSERT_LINE = re.compile(r"^(\S+\.py):(\d+):\s*(\w*Error.*)$")
 
 
+def _data(text: str) -> str:
+    """Escape a workflow command's message. Raw newlines truncate it."""
+    return (text.replace("%", "%25")
+                .replace("\r", "%0D")
+                .replace("\n", "%0A"))
+
+
+def _prop(text: str) -> str:
+    """Escape a property value, which also may not contain , or :."""
+    return _data(text).replace(",", "%2C").replace(":", "%3A")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("::error::annotate_pytest.py needs a log file path")
@@ -80,13 +92,22 @@ def main(argv: list[str]) -> int:
 
     for kind, test_id, reason in failures:
         name = test_id.rsplit("::", 1)[-1]
-        where = ""
+
+        # Workflow command syntax is strict: "::error key=value,key=value::msg".
+        # A SPACE separates the command from its properties and commas separate
+        # the properties. Emitting "::error,title=..." -- a comma in the space's
+        # place -- is silently discarded by GitHub, which is how an earlier
+        # version of this script reported a failure count and no test name.
+        properties = []
         for key, (file_name, line_number) in locations.items():
             if key.endswith(name):
-                where = f" file={file_name},line={line_number}"
+                properties.append(f"file={file_name}")
+                properties.append(f"line={line_number}")
                 break
+        properties.append(f"title={_prop(kind + ': ' + name)}")
+
         detail = reason or "see the job log for the traceback"
-        print(f"::error{where},title={kind}: {name}::{detail}")
+        print(f"::error {','.join(properties)}::{_data(detail)}")
 
     if summary:
         print(f"::notice title=pytest::{summary}")
