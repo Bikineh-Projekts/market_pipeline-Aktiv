@@ -19,7 +19,7 @@ from contextlib import contextmanager
 
 import psycopg2
 
-from . import auth, config
+from . import auth, config, redact
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,19 @@ def connect():
     native Postgres password role needs none of that, because those
     passwords do not expire -- see pipeline/auth.py.
     """
+    # options sets the session time zone at startup. Without it the session
+    # runs in the server's zone (UTC on Render), and then CURRENT_DATE and
+    # every `timestamptz::date` cast resolve to the UTC day -- so a row
+    # written at 23:30 UTC is filed under the previous Berlin day. The
+    # stored instants are unaffected either way; this decides which
+    # calendar day they are counted in.
     if config.DATABASE_URL:
         url = config.DATABASE_URL
         if config.lakebase_oauth_enabled():
             url = auth.apply_token(url, auth.database_token())
-        return psycopg2.connect(url, connect_timeout=20)
+        return psycopg2.connect(
+            url, connect_timeout=20, options=config.PG_SESSION_OPTIONS
+        )
 
     password = config.PGPASSWORD
     user = config.PGUSER
@@ -56,6 +64,7 @@ def connect():
         password=password,
         sslmode=config.PGSSLMODE,
         connect_timeout=20,
+        options=config.PG_SESSION_OPTIONS,
     )
 
 
@@ -215,7 +224,15 @@ def log_api_call(
                     endpoint,
                     http_status,
                     response_ms,
-                    (error or "")[:1000] or None,
+                    # Scrubbed here, at the only place error text enters
+                    # this table, rather than at each caller. requests puts
+                    # the whole request URL into the string form of a
+                    # connection error, and Twelve Data and Alpha Vantage
+                    # carry the API key in the query string -- so an
+                    # unscrubbed message writes a live key into a column
+                    # that the dashboard, the Power BI model and the public
+                    # data export all read.
+                    redact.scrub(error, limit=1000) or None,
                 ),
             )
     except Exception as exc:  # logging must never break the pipeline
@@ -270,8 +287,11 @@ def close_run(
                        error_msg        = %s
                  WHERE run_id = %s
                 """,
+                # Same reason as log_api_call, plus one of its own: a
+                # fatal error here can be a psycopg2 failure whose message
+                # contains the whole DSN, password included.
                 (duration, status, symbols_ok, symbols_failed, rows_written,
-                 (error or "")[:2000] or None, run_id),
+                 redact.scrub(error, limit=2000) or None, run_id),
             )
     except Exception as exc:
         logger.warning("could not close run log: %s", exc)

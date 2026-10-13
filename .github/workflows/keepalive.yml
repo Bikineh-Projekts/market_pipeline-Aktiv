@@ -17,7 +17,8 @@ name: Keep awake
 #     counted against 2000/month on a private one.
 #
 # So it pings only during waking hours, not around the clock: 06:00-21:00
-# UTC, every 14 minutes. That is under the 15-minute spin-down window with
+# UTC -- 08:00-23:00 Berlin in summer, 07:00-22:00 in winter, because
+# GitHub's cron has no time-zone field -- every 14 minutes. That is under the 15-minute spin-down window with
 # a minute to spare, and it leaves the service asleep overnight when no one
 # is looking, which is where the instance-hour savings come from.
 #

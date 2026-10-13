@@ -2,7 +2,7 @@
 
 {% block title %}{{ state|capitalize }} — market pipeline{% endblock %}
 
-{% block masthead_right %}Read {{ generated_at|dt }} UTC{% endblock %}
+{% block masthead_right %}Read {{ generated_at|dt }} {{ timezone_label }}{% endblock %}
 
 {% block head %}
 <style>
@@ -208,7 +208,7 @@
     <table>
       <thead>
         <tr>
-          <th>Started</th>
+          <th>Started ({{ timezone_label }})</th>
           <th>Trigger</th>
           <th>Status</th>
           <th class="num">Symbols</th>
@@ -220,7 +220,7 @@
       <tbody>
         {% for r in runs %}
         <tr>
-          <td class="nowrap">{{ r.started_at_utc|dt }}</td>
+          <td class="nowrap">{{ r.started_at_local|dt }}</td>
           <td class="dim">{{ r.trigger_source }}</td>
           <td><span class="chip {{ r.status|run_tone }}">{{ r.status }}</span></td>
           <td class="num">{{ r.symbols_ok }}{% if r.symbols_failed %} / {{ r.symbols_ok + r.symbols_failed }}{% endif %}</td>
@@ -249,7 +249,7 @@
           <th class="num">Failed</th>
           <th class="num">Success</th>
           <th class="num">Avg latency</th>
-          <th class="num">Last call</th>
+          <th class="num">Last call ({{ timezone_label }})</th>
         </tr>
       </thead>
       <tbody>
@@ -309,7 +309,7 @@
     <table>
       <thead>
         <tr>
-          <th>When</th>
+          <th>When ({{ timezone_label }})</th>
           <th>Source</th>
           <th>Endpoint</th>
           <th class="num">Status</th>
@@ -319,7 +319,7 @@
       <tbody>
         {% for e in errors %}
         <tr>
-          <td class="nowrap">{{ e.called_at_utc|dt }}</td>
+          <td class="nowrap">{{ e.called_at_local|dt }}</td>
           <td>{{ e.source or "—" }}</td>
           <td class="dim">{{ e.endpoint }}</td>
           <td class="num down">{{ e.http_status or "—" }}</td>

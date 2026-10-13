@@ -22,17 +22,56 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import config, db
 from .collectors import alphavantage, finnhub, twelvedata
 from .collectors.base import ApiError, pause
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+def _zone() -> timezone | ZoneInfo:
+    """
+    The display zone. Falls back to UTC on a bad name rather than refusing
+    to start: a mistyped APP_TIMEZONE should cost a wrong log label, not
+    the whole run.
+    """
+    try:
+        return ZoneInfo(config.APP_TIMEZONE)
+    except Exception:
+        return timezone.utc
+
+
+# Log lines carry local time, because the person reading them reads a
+# local clock. The run page is where a failure gets diagnosed, and
+# "19:42" matching the wall clock is the difference between spotting the
+# gap in the schedule and doing arithmetic in your head.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# staticmethod, not a bare lambda: assigned to the class, a plain function
+# binds, so logging calls it as converter(self, secs) and the timestamp
+# never renders. logging reports formatting errors to stderr rather than
+# raising, so the bare version loses the clock from every log line without
+# failing anything.
+logging.Formatter.converter = staticmethod(
+    lambda secs: datetime.fromtimestamp(secs, _zone()).timetuple()
+)
 logger = logging.getLogger("pipeline")
 
 
 def _now() -> datetime:
+    """
+    Always an aware UTC instant. What is STORED stays absolute; only what
+    is DISPLAYED is converted. Storing local time would make the hour
+    Berlin repeats every October ambiguous and break every "latest row"
+    query inside it.
+    """
     return datetime.now(timezone.utc)
+
+
+def _local(moment: datetime) -> datetime:
+    return moment.astimezone(_zone())
 
 
 def collect_symbol(symbol: str, options: argparse.Namespace, run_id: int | None) -> dict:
@@ -172,6 +211,7 @@ def main(argv=None) -> int:
     failed = len(results) - ok
     rows = sum(r["rows"] for r in results)
     duration = round(time.perf_counter() - started_perf, 2)
+    finished = _now()
 
     degraded = sum(1 for r in results if r.get("degraded"))
     all_errors = "; ".join(f"{r['symbol']} {e}" for r in results for e in r["errors"])[:2000]
@@ -200,8 +240,15 @@ def main(argv=None) -> int:
         "run_uid": run_uid,
         "trigger": options.trigger,
         "status": status,
+        # Both, deliberately: the UTC pair is what anything downstream
+        # should compare and sort on, the local pair is what a person
+        # reads. Publishing only one of them guarantees someone uses it
+        # for the wrong purpose.
+        "timezone": config.APP_TIMEZONE,
         "started_at_utc": started.isoformat(),
-        "finished_at_utc": _now().isoformat(),
+        "finished_at_utc": finished.isoformat(),
+        "started_at_local": _local(started).strftime("%Y-%m-%d %H:%M:%S"),
+        "finished_at_local": _local(finished).strftime("%Y-%m-%d %H:%M:%S"),
         "duration_seconds": duration,
         "symbols_total": len(symbols),
         "symbols_ok": ok,

@@ -15,11 +15,31 @@ name: ETL
 # for short application runs; only migrations and maintenance need the
 # direct endpoint (see the Database and Maintenance workflows).
 #
-# Cron is UTC. 14:00-21:00 UTC covers the US session.
+# CRON IS UTC, AND THERE IS NO WAY TO MAKE IT ANYTHING ELSE. GitHub's
+# `schedule:` has no time-zone field, so these numbers cannot be written in
+# Berlin time -- which also means a fixed cron DRIFTS against the Berlin
+# clock twice a year, by an hour, in both directions:
+#
+#   14:00-21:00 UTC  =  16:00-23:00 Berlin  (CEST, late Mar - late Oct)
+#                    =  15:00-22:00 Berlin  (CET,  late Oct - late Mar)
+#
+# That drift is harmless here, because the window tracks the US trading
+# session rather than the Berlin working day: New York is 14:30-21:00 UTC
+# all year, since the US and the EU shift their clocks within a few weeks
+# of each other. Pinning the window to Berlin instead would move it off
+# the market by an hour for those few weeks.
+#
+# Everything the pipeline STORES and DISPLAYS is Berlin time -- see
+# APP_TIMEZONE and the local_ts/local_date functions. Only the trigger
+# times on this page are UTC, because GitHub gives no alternative.
 # ---------------------------------------------------------------------
 on:
   schedule:
+    # Every 30 min across the US session.
     - cron: "0,30 14-21 * * 1-5"
+    # The nightly full run: 22:30 UTC = 00:30 Berlin in summer, 23:30 in
+    # winter. Note the summer case lands on the NEXT Berlin day, which is
+    # why date_key is derived from the local day and not the UTC one.
     - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:

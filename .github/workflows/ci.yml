@@ -119,7 +119,7 @@ jobs:
           node-version: "20"
 
       - name: Python compiles
-        run: python -m compileall -q pipeline web tests
+        run: python -m compileall -q pipeline web tests tools
 
       - name: Workflows are valid YAML
         run: |
@@ -218,3 +218,29 @@ jobs:
 
       - name: No credentials committed
         run: python tools/check_no_credentials.py
+
+      - name: The export guard recognises a planted credential
+        run: |
+          # The guard is the last thing between a leaked API key and a
+          # public branch, so CI checks that it actually fires. The key is
+          # planted inside a GZIPPED CSV on purpose: that is exactly where
+          # a plain `grep -I` cannot see it, which is why the guard is a
+          # tool and not a grep.
+          mkdir -p /tmp/fake-export/csv
+          printf 'log_id,error_msg\n1,"url: /q?apikey=cq3nf9pr01qhb7k2m8x4"\n' \
+            | gzip > /tmp/fake-export/csv/log_api_call.csv.gz
+
+          if python tools/check_export_safe.py /tmp/fake-export; then
+            echo "::error title=Export guard is broken::It passed an export containing an API key inside a gzipped CSV, so a leak would be published."
+            exit 1
+          fi
+          echo "The guard caught it, as it should."
+
+          # And the other direction: a clean export must not be blocked,
+          # or every export fails and the guard gets switched off.
+          rm -rf /tmp/fake-export
+          mkdir -p /tmp/clean-export/csv
+          printf 'log_id,error_msg\n1,"rate limit exceeded"\n2,"url: /q?apikey=***"\n' \
+            | gzip > /tmp/clean-export/csv/log_api_call.csv.gz
+          python tools/check_export_safe.py /tmp/clean-export
+          rm -rf /tmp/clean-export
