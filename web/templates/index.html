@@ -26,6 +26,7 @@
   .verdict .word.ok   { color: var(--ok); }
   .verdict .word.warn { color: var(--warn); }
   .verdict .word.bad  { color: var(--bad); }
+  .verdict .word.idle { color: var(--muted); }
 
   .verdict .reason {
     margin: .5rem 0 0;
@@ -67,6 +68,7 @@
   }
   .fill.warn { background: var(--warn); }
   .fill.bad  { background: var(--bad); }
+  .fill.idle { background: var(--rule); }
   @keyframes fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
   @media (prefers-reduced-motion: reduce) {
     .fill { animation: none; }
@@ -106,7 +108,8 @@
 
 {% block content %}
 
-{% set pct = health.quote_age_minutes|budget_pct(max_age_min) %}
+{% set started = runs|length > 0 %}
+{% set pct = health.quote_age_minutes|budget_pct(max_age_min, started) %}
 {% set tone = state|tone %}
 
 <div class="verdict">
@@ -123,12 +126,12 @@
     <div class="row">
       <span class="age">
         {% if health.quote_age_minutes is none %}
-          no quotes yet
+          {{ "not collected yet" if not started else "no quotes yet" }}
         {% else %}
           {{ health.quote_age_minutes|age }}
         {% endif %}
       </span>
-      <span>{{ pct|round|int }}% of budget used</span>
+      <span>{% if health.quote_age_minutes is none and not started %}waiting for the first run{% else %}{{ pct|round|int }}% of budget used{% endif %}</span>
     </div>
     <div class="track">
       <span class="fill {{ tone }}" style="--pct: {{ pct }}%"></span>
