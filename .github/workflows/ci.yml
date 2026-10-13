@@ -66,7 +66,9 @@ jobs:
           # The raw log takes several clicks to reach and is not always
           # retrievable through the API, which made a red run opaque.
           set +e
-          python -m pytest -v --tb=short 2>&1 | tee /tmp/pytest.log
+          # -rf prints the short summary of failures, which is what the
+          # annotator reads. Without it pytest reports a count and no names.
+          python -m pytest -v -rf --tb=short 2>&1 | tee /tmp/pytest.log
           set -e
           python tools/annotate_pytest.py /tmp/pytest.log
 

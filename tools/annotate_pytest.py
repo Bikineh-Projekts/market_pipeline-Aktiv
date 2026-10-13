@@ -21,8 +21,11 @@ import pathlib
 import re
 import sys
 
-# "FAILED tests/test_web.py::test_name - AssertionError: msg"
+# The short-summary form, which needs -r: "FAILED tests/x.py::t - msg"
 RESULT = re.compile(r"^(FAILED|ERROR)\s+(\S+?)(?:\s+-\s+(.*))?$")
+# The verbose per-test form, present with -v even without -r:
+#   "tests/test_web.py::test_name FAILED                        [ 42%]"
+VERBOSE = re.compile(r"^(\S+::\S+)\s+(FAILED|ERROR)\b")
 # The summary line: "=== 3 failed, 107 passed in 45.12s ==="
 SUMMARY = re.compile(r"^=+\s*(.*?(?:passed|failed|error).*?)\s*=+$")
 # An assertion line inside a short traceback: "tests/x.py:42: AssertionError"
@@ -66,6 +69,14 @@ def main(argv: list[str]) -> int:
         match = RESULT.match(stripped)
         if match:
             failures.append((match.group(1), match.group(2), match.group(3) or ""))
+            continue
+
+        # Fall back to the verbose line form. Without -r, pytest prints no
+        # short summary at all, which is how the first version of this
+        # script reported a summary and no failing test names.
+        match = VERBOSE.match(stripped)
+        if match and not any(f[1] == match.group(1) for f in failures):
+            failures.append((match.group(2), match.group(1), ""))
 
     for kind, test_id, reason in failures:
         name = test_id.rsplit("::", 1)[-1]
