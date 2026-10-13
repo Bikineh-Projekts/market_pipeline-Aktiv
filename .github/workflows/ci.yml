@@ -46,9 +46,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Read from .python-version, the same file Render reads. Testing on a
+      # different interpreter than production is how a missing wheel reaches
+      # a deploy: Render defaults new services to Python 3.14, which has no
+      # psycopg2-binary wheel below 2.9.13, so pip compiled it from source
+      # and produced a .so that failed to import.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -67,7 +72,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
 
       - uses: actions/setup-node@v4
         with:
@@ -111,6 +116,12 @@ jobs:
 
       - name: Monitor parses
         run: node --check monitor/monitor.mjs
+
+      - name: Dependencies have wheels for the pinned Python
+        run: python tools/check_wheels.py
+
+      - name: Dockerfile is sane
+        run: python tools/check_dockerfile.py
 
       - name: Render blueprint is valid YAML
         run: |
