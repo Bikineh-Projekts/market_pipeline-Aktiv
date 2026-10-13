@@ -11,6 +11,10 @@ name: Database
 #     audit     20 data-quality checks: freshness, grain, orphans,
 #               NULL slicer columns, derived-value arithmetic.
 #               Read-only; fails the run on any FAIL.
+#     dates     where every date in the database comes from: span per
+#               table, candles per year, and which calendar years are
+#               empty. Run this when a report shows unexpected years.
+#               Read-only.
 #     reset     drop only the bi_* views and rebuild them. Data untouched.
 #
 # Pooled vs direct endpoint:
@@ -29,7 +33,7 @@ on:
         type: choice
         required: true
         default: migrate
-        options: [migrate, backfill, verify, audit, reset]
+        options: [migrate, backfill, verify, audit, dates, reset]
       symbols:
         description: "Symbols for backfill"
         required: false
@@ -134,7 +138,9 @@ jobs:
           echo "Views dropped. Tables and data untouched."
 
       - name: Apply schema and views
-        if: inputs.action != 'verify' && inputs.action != 'audit'
+        if: >-
+          inputs.action != 'verify' && inputs.action != 'audit'
+          && inputs.action != 'dates'
         run: |
           psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
           psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
@@ -210,6 +216,39 @@ jobs:
             exit 1
           fi
           echo "::notice title=Audit passed::$PASSED checks passed, $WARNED warning(s)"
+
+      - name: Report where the dates come from
+        if: inputs.action == 'dates'
+        run: |
+          # "I see 2023 dates" has two unrelated causes that need opposite
+          # fixes: real backfilled history (correct, just more than
+          # expected) and generated calendar rows with no facts behind them
+          # (the thing that puts empty years in a Power BI slicer). This
+          # report separates them instead of guessing.
+          psql "$ADMIN_URL" -f sql/05_dates.sql | tee /tmp/dates.txt
+
+          {
+            echo "## Where the dates come from"
+            echo ""
+            echo '```'
+            cat /tmp/dates.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # The two headline numbers, as annotations, so they are legible
+          # on the run page without opening the log.
+          SPAN=$(psql "$ADMIN_URL" -tAc "
+            SELECT COALESCE(MIN(candle_time_utc)::date::text, 'none') || ' .. ' ||
+                   COALESCE(MAX(candle_time_utc)::date::text, 'none')
+              FROM fact_market_timeseries;")
+          EMPTY=$(psql "$ADMIN_URL" -tAc "
+            SELECT COUNT(*) FROM (
+              SELECT d.year FROM bi_dim_date d
+               LEFT JOIN (SELECT DISTINCT date_key FROM bi_fact_price_daily) f
+                      ON f.date_key = d.date_key
+               GROUP BY d.year HAVING COUNT(f.date_key) = 0) x;")
+          echo "::notice title=Price history held::$SPAN"
+          echo "::notice title=Calendar years with no price data::$EMPTY year(s) appear in date slicers with nothing behind them"
 
       - name: Verify
         if: always() && env.ADMIN_URL != ''
