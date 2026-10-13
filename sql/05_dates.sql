@@ -74,7 +74,7 @@ SELECT 'log_pipeline_run', 'started_at_utc', COUNT(*),
 \echo ''
 \echo '=== 3. Candles per year and interval (cause (a)) ===================='
 -- This is the table that answers "are the 2023 rows real prices?".
-SELECT EXTRACT(YEAR FROM t.candle_time_utc)::int AS year,
+SELECT EXTRACT(YEAR FROM local_ts(t.candle_time_utc))::int AS year,
        i.interval_code,
        COUNT(*)                                  AS candles,
        COUNT(DISTINCT t.symbol_id)               AS symbols,
@@ -87,7 +87,7 @@ SELECT EXTRACT(YEAR FROM t.candle_time_utc)::int AS year,
 
 \echo ''
 \echo '=== 4. Indicators per year ========================================='
-SELECT EXTRACT(YEAR FROM candle_time_utc)::int AS year,
+SELECT EXTRACT(YEAR FROM local_ts(candle_time_utc))::int AS year,
        COUNT(*) AS rows,
        MIN(candle_time_utc)::date AS first_day,
        MAX(candle_time_utc)::date AS last_day
@@ -156,12 +156,13 @@ SELECT 'quotes in the future', COUNT(*)
   FROM fact_market_quote WHERE COALESCE(quote_time_utc, fetched_at_utc) > NOW() + INTERVAL '1 day'
 UNION ALL
 SELECT 'candles at exactly midnight UTC', COUNT(*)
-  FROM fact_market_timeseries WHERE candle_time_utc::time = TIME '00:00:00'
+  FROM fact_market_timeseries
+ WHERE (candle_time_utc AT TIME ZONE 'UTC')::time = TIME '00:00:00'
 UNION ALL
 SELECT 'daily candles on a weekend', COUNT(*)
   FROM fact_market_timeseries t JOIN dim_interval i USING (interval_id)
  WHERE i.interval_code IN ('1day','daily')
-   AND EXTRACT(ISODOW FROM t.candle_time_utc) > 5
+   AND EXTRACT(ISODOW FROM local_ts(t.candle_time_utc)) > 5
  ORDER BY 1;
 
 \echo ''

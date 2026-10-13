@@ -1,0 +1,222 @@
+name: Export data
+
+# ---------------------------------------------------------------------
+# Publishes the database as files on the `data-export` branch, so there is
+# always something at a fixed URL to download -- no login, no API token,
+# no Actions artifact to unzip:
+#
+#   https://raw.githubusercontent.com/OWNER/REPO/data-export/manifest.json
+#   https://raw.githubusercontent.com/OWNER/REPO/data-export/market_data.xlsx
+#   https://raw.githubusercontent.com/OWNER/REPO/data-export/csv/<table>.csv.gz
+#
+# (Those URLs are public on a public repository. On a private one they need
+# a token, and `gh release download` or the artifact is easier.)
+#
+#
+# ABOUT "EVERY SECOND"
+#
+# This cannot run every second, and no GitHub workflow can:
+#
+#   * the documented minimum for `schedule` is every 5 minutes;
+#   * scheduled runs are best-effort and are routinely delayed by several
+#     minutes under load, so the real spacing is more like 5-20 minutes;
+#   * a run spends ~40 seconds on checkout and pip before it reads a single
+#     row, so sub-minute intervals would overlap each other.
+#
+# And it would buy nothing even if it were possible. The data only changes
+# when the ETL runs, which is every 30 minutes during market hours, bounded
+# by the API quotas (Alpha Vantage allows 25 requests a DAY). A per-second
+# export would publish about 1,800 byte-identical copies between two actual
+# updates.
+#
+# So this workflow is triggered by the ETL FINISHING, which is the moment
+# the data actually changed, plus a slow cron as a safety net. The file is
+# then as fresh as the data ever gets, and no run is wasted.
+#
+# For a genuinely continuous local copy -- which is what the files were
+# wanted for -- run tools/replicate.py on your own machine instead. It
+# connects straight to the Render database and copies only the rows your
+# copy has not seen, so a pass costs a few small queries when nothing has
+# changed (measured: ~35 ms locally). `--loop 10` is a sensible interval;
+# `--loop 1` works and is mostly idle. See docs/LOCAL_COPY.md.
+# ---------------------------------------------------------------------
+on:
+  # The moment the data changed. Fires on completion whatever the outcome,
+  # and the job checks the conclusion: a partial ETL still wrote rows worth
+  # exporting, a failed one did not.
+  workflow_run:
+    workflows: ["ETL"]
+    types: [completed]
+  schedule:
+    # 06:20 and 18:20 UTC. A safety net only -- it covers the case where
+    # the ETL has not run for a while but the export is still wanted, and
+    # it keeps the branch from going stale enough to look broken. An odd
+    # minute because schedules on the hour are the most contended.
+    - cron: "20 6,18 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_xlsx:
+        description: "CSV only (faster, and no openpyxl)"
+        type: boolean
+        default: false
+
+concurrency:
+  # Not cancel-in-progress: this force-pushes a branch, and cancelling
+  # between `git add` and `git push` would leave nothing published.
+  group: export
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to push the data-export branch
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Skip the run when the ETL failed outright. `partial` is not a
+    # failure: some sources worked, rows were written, and refusing to
+    # publish them would leave the copy older than it needs to be.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          if [ "${{ inputs.skip_xlsx }}" != "true" ]; then
+            pip install openpyxl==3.1.5
+          fi
+
+      - name: Check the secret is there
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error title=Missing secret::DATABASE_URL is not set."
+            echo ""
+            echo "Settings -> Secrets and variables -> Actions -> New repository secret"
+            echo "Note: Render's Environment and GitHub Actions secrets are"
+            echo "separate stores. Setting it in one does not set it in the other."
+            exit 1
+          fi
+
+      - name: Export
+        id: export
+        run: |
+          FLAGS=""
+          [ "${{ inputs.skip_xlsx }}" = "true" ] && FLAGS="--no-xlsx"
+          python tools/export_data.py --url "$DATABASE_URL" --out export $FLAGS
+
+          ROWS=$(python -c "import json;print(json.load(open('export/manifest.json'))['total_rows'])")
+          SIZE=$(du -sh export | cut -f1)
+          echo "rows=$ROWS" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the same files as an artifact
+        # A second copy that does not depend on the branch, and the only
+        # copy if the credential check or the push below refuses. Uploaded
+        # BEFORE publishing, because publishing moves these files away.
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-export-${{ github.run_id }}
+          path: export
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Refuse to publish a credential
+        run: |
+          # Not a grep. `grep -I` skips binary files, and an export is
+          # almost entirely binary -- gzipped CSVs and a zipped workbook --
+          # so a key in a log_api_call.error_msg cell passes a grep
+          # untouched and gets published. This reads the decompressed
+          # bytes, including the XML inside the .xlsx.
+          #
+          # pipeline/redact.py strips API keys and DSNs on the way INTO the
+          # database, which is the real fix. This is the backstop for rows
+          # written before that existed, and for anything it misses.
+          #
+          # The branch is public on a public repository and a force-push
+          # cannot be taken back, so this runs before the push, not after.
+          python tools/check_export_safe.py export
+
+      - name: Publish to the data-export branch
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          STAMP_UTC=$(date -u '+%Y-%m-%d %H:%M:%S')
+          STAMP_LOCAL=$(TZ=Europe/Berlin date '+%Y-%m-%d %H:%M:%S %Z')
+
+          # An ORPHAN branch, rebuilt and force-pushed every time. The
+          # alternative -- committing each export on top of the last -- adds
+          # the whole compressed dataset to the repository's history on
+          # every run, and a repository that grows by its own size every 30
+          # minutes becomes unusable within weeks. Nothing here is history:
+          # the dumps in the Backup workflow's artifacts are, and they are
+          # kept for 90 days.
+          git checkout --orphan data-export
+          git rm -rq --cached . || true
+
+          # Move the export out of the working tree, clear the tree
+          # completely, then move it back at the root -- so the branch holds
+          # only data and the raw URLs stay short. Done in that order
+          # because deleting the tree while the export is still inside it
+          # would delete the export too.
+          mv export /tmp/payload
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          mv /tmp/payload/* .
+          rmdir /tmp/payload
+
+          # No "skip if unchanged" check here, deliberately. Two reasons it
+          # could not work: `git checkout --orphan` leaves no parent commit
+          # to diff against, so everything always reads as new; and
+          # manifest.json records exported_at, so two exports are never
+          # byte-identical anyway. One commit per run, on a branch that is
+          # always one commit deep, costs nothing.
+          git add -A
+          git commit -q -m "Data export ${STAMP_LOCAL}
+
+          ${{ steps.export.outputs.rows }} rows, ${{ steps.export.outputs.size }}.
+          Exported from ${{ github.sha }} by run ${{ github.run_id }}.
+          ${STAMP_UTC} UTC / ${STAMP_LOCAL}"
+          git push --force -q origin data-export
+          echo "::notice title=Published::${{ steps.export.outputs.rows }} rows pushed to the data-export branch"
+
+      - name: Where to find it
+        if: always()
+        run: |
+          RAW="https://raw.githubusercontent.com/${{ github.repository }}/data-export"
+          {
+            echo "## Data export"
+            echo ""
+            echo "**${{ steps.export.outputs.rows }} rows** · ${{ steps.export.outputs.size }}"
+            echo ""
+            echo "| file | link |"
+            echo "| --- | --- |"
+            echo "| manifest | [manifest.json]($RAW/manifest.json) |"
+            echo "| workbook | [market_data.xlsx]($RAW/market_data.xlsx) |"
+            echo "| how to load it | [README.md]($RAW/README.md) |"
+            echo ""
+            echo "Pull it from your own machine:"
+            echo ""
+            echo '```bash'
+            echo "curl -fL -o market_data.xlsx $RAW/market_data.xlsx"
+            echo "curl -fsSL $RAW/manifest.json | python -m json.tool"
+            echo '```'
+            echo ""
+            echo "For a copy that stays current, don't poll these files --"
+            echo "run \`tools/replicate.py\` against the database directly."
+            echo "See [docs/LOCAL_COPY.md](../blob/main/docs/LOCAL_COPY.md)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -14,6 +14,25 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+# --- time zone --------------------------------------------------------
+# One setting decides what "the clock" means everywhere: the session time
+# zone Postgres is asked for, the wall-clock columns in the BI views, the
+# timestamps in the log lines, and the clock on the dashboard.
+#
+# Instants are still STORED as TIMESTAMPTZ, which is an absolute point in
+# time and carries no zone of its own. That is deliberate and must not be
+# "fixed" by storing local time instead: on the last Sunday in October the
+# Berlin wall clock reads 02:00-03:00 twice, so a naive local timestamp in
+# that hour is genuinely ambiguous and no longer sorts correctly. Storing
+# the instant and displaying it in Berlin is the only version that is
+# right in both directions.
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin"
+
+# Passed as a libpq startup option rather than a `SET` statement: a startup
+# parameter survives PgBouncer in transaction mode, where a `SET` issued on
+# one transaction is not there for the next.
+PG_SESSION_OPTIONS = f"-c TimeZone={APP_TIMEZONE}"
+
 # --- database ---------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 PGHOST = os.getenv("PGHOST", "")

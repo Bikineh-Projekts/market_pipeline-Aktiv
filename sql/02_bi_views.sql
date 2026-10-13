@@ -8,39 +8,102 @@
 --   3. Every fact has date_key INT (YYYYMMDD) -> single fast relationship to bi_dim_date.
 --   4. Explicit column list, no SELECT * -> schema stays stable when tables change.
 --   5. Prefix bi_ so BI objects are separate from the raw dim_/fact_/log_ tables.
+--   6. Every instant appears TWICE: `<name>_utc` is the absolute instant as
+--      stored, and `<name>_local` is the same instant on the Berlin wall
+--      clock as a naive timestamp. Power BI has no time-zone type, so a
+--      TIMESTAMPTZ arrives converted to whichever zone the report server
+--      runs in -- the naive local column is the only one that shows the
+--      same clock to everyone. Build visuals on `_local`.
+--   7. date_key and every `*_date` column come from the LOCAL day
+--      (local_date_key / local_date in 01_schema.sql), not the UTC day. A
+--      quote fetched at 23:30 UTC belongs to the next Berlin day, and
+--      filing it under the UTC day puts it in the wrong bucket every night.
 --
 -- Run once:  psql "$DATABASE_URL" -f sql/01_powerbi_star.sql
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
 -- DIMENSION: DATE
--- Covers 2015-01-01 .. today + 2 years (earnings calendar is in the future)
+--
+-- The span is DERIVED from what was actually collected, not fixed.
+--
+-- It used to be a hardcoded 2015-01-01 .. today + 2 years, and that is the
+-- reason a report showed years nobody had data for. A date dimension is
+-- generated, not collected, so every year it spans appears in every date
+-- slicer whether or not a single price exists in it -- measured on the live
+-- database: 9 of the 14 years it produced were completely empty.
+--
+-- Bounds are snapped OUT to whole calendar years, which is the one thing
+-- that must not be trimmed away: Power BI's time intelligence (YTD, YoY,
+-- SAMEPERIODLASTYEAR) silently returns wrong numbers on a date table whose
+-- first or last year is a partial one. So a part-year of data yields a
+-- complete year of calendar, and no more.
+--
+-- The upper bound also covers the earnings calendar, which is legitimately
+-- in the future.
+--
+-- Deliberately NOT included: fact_company_fundamental.ipo_date. Apple
+-- listed in 1980, and letting that set the lower bound would put four
+-- empty decades back into the slicer. ipo_date is an attribute of the
+-- company, not a date to slice facts by, and it is exposed as one.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_dim_date AS
+WITH span AS (
+    SELECT
+        LEAST(
+            COALESCE((SELECT MIN(local_date(candle_time_utc)) FROM fact_market_timeseries), local_today()),
+            COALESCE((SELECT MIN(local_date(candle_time_utc)) FROM fact_market_indicator),  local_today()),
+            COALESCE((SELECT MIN(local_date(COALESCE(quote_time_utc, fetched_at_utc))) FROM fact_market_quote), local_today()),
+            COALESCE((SELECT MIN(report_date) FROM fact_earnings_calendar), local_today()),
+            COALESCE((SELECT MIN(local_date(started_at_utc)) FROM log_pipeline_run), local_today()),
+            local_today()
+        ) AS lo,
+        GREATEST(
+            COALESCE((SELECT MAX(local_date(candle_time_utc)) FROM fact_market_timeseries), local_today()),
+            COALESCE((SELECT MAX(local_date(candle_time_utc)) FROM fact_market_indicator),  local_today()),
+            COALESCE((SELECT MAX(local_date(COALESCE(quote_time_utc, fetched_at_utc))) FROM fact_market_quote), local_today()),
+            COALESCE((SELECT MAX(report_date) FROM fact_earnings_calendar), local_today()),
+            COALESCE((SELECT MAX(local_date(called_at_utc)) FROM log_api_call), local_today()),
+            local_today()
+        ) AS hi
+), bounds AS (
+    SELECT DATE_TRUNC('year', lo)::date                                   AS from_date,
+           (DATE_TRUNC('year', hi) + INTERVAL '1 year - 1 day')::date     AS to_date
+      FROM span
+), days AS (
+    SELECT generate_series(b.from_date, b.to_date, INTERVAL '1 day')::date AS d
+      FROM bounds b
+), with_data AS (
+    SELECT DISTINCT local_date(candle_time_utc) AS d FROM fact_market_timeseries
+)
 SELECT
-    TO_CHAR(d, 'YYYYMMDD')::INT                       AS date_key,
-    d::DATE                                           AS full_date,
-    EXTRACT(YEAR    FROM d)::INT                      AS year,
-    EXTRACT(QUARTER FROM d)::INT                      AS quarter,
-    'Q' || EXTRACT(QUARTER FROM d)::INT               AS quarter_name,
-    EXTRACT(MONTH   FROM d)::INT                      AS month_number,
-    TO_CHAR(d, 'Mon')                                 AS month_short,
-    TO_CHAR(d, 'Month')                               AS month_name,
-    EXTRACT(YEAR FROM d)::INT * 100
-        + EXTRACT(MONTH FROM d)::INT                  AS year_month_key,
-    TO_CHAR(d, 'YYYY-MM')                             AS year_month_label,
-    EXTRACT(WEEK FROM d)::INT                         AS iso_week,
-    EXTRACT(ISODOW FROM d)::INT                       AS weekday_number,
-    TO_CHAR(d, 'Dy')                                  AS weekday_short,
-    (EXTRACT(ISODOW FROM d) <= 5)                     AS is_weekday,
-    (d::DATE = CURRENT_DATE)                          AS is_today,
-    (d::DATE >= CURRENT_DATE - INTERVAL '30 days'
-     AND d::DATE <= CURRENT_DATE)                     AS is_last_30_days
-FROM generate_series(
-        DATE '2015-01-01',
-        (CURRENT_DATE + INTERVAL '2 years')::DATE,
-        INTERVAL '1 day'
-     ) AS d;
+    TO_CHAR(days.d, 'YYYYMMDD')::INT                  AS date_key,
+    days.d                                            AS full_date,
+    EXTRACT(YEAR    FROM days.d)::INT                 AS year,
+    EXTRACT(QUARTER FROM days.d)::INT                 AS quarter,
+    'Q' || EXTRACT(QUARTER FROM days.d)::INT          AS quarter_name,
+    EXTRACT(MONTH   FROM days.d)::INT                 AS month_number,
+    TO_CHAR(days.d, 'Mon')                            AS month_short,
+    TO_CHAR(days.d, 'Month')                          AS month_name,
+    EXTRACT(YEAR FROM days.d)::INT * 100
+        + EXTRACT(MONTH FROM days.d)::INT             AS year_month_key,
+    TO_CHAR(days.d, 'YYYY-MM')                        AS year_month_label,
+    EXTRACT(WEEK FROM days.d)::INT                    AS iso_week,
+    EXTRACT(ISODOW FROM days.d)::INT                  AS weekday_number,
+    TO_CHAR(days.d, 'Dy')                             AS weekday_short,
+    (EXTRACT(ISODOW FROM days.d) <= 5)                AS is_weekday,
+    -- Today in the display zone, not in the session's zone. Between
+    -- midnight and 01:00 or 02:00 Berlin those are different days, and
+    -- an "is_today" that is wrong for two hours a night is worse than none.
+    (days.d = local_today())                          AS is_today,
+    (days.d >= local_today() - INTERVAL '30 days'
+     AND days.d <= local_today())                     AS is_last_30_days,
+    (days.d <= local_today())                         AS is_past_or_today,
+    -- Lets a visual drop the days that exist only to complete a year,
+    -- without having to narrow the table and break time intelligence.
+    (wd.d IS NOT NULL)                                AS has_price_data
+FROM days
+LEFT JOIN with_data wd ON wd.d = days.d;
 
 
 -- ---------------------------------------------------------------------
@@ -134,7 +197,7 @@ WITH daily AS (
         t.symbol_id,
         t.source_id,
         t.interval_id,
-        t.candle_time_utc::DATE AS trade_date,
+        local_date(t.candle_time_utc) AS trade_date,
         t.open, t.high, t.low, t.close, t.volume
     FROM fact_market_timeseries t
     JOIN dim_interval i ON i.interval_id = t.interval_id
@@ -182,13 +245,18 @@ FROM with_lag;
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_price_intraday AS
 SELECT
-    TO_CHAR(t.candle_time_utc, 'YYYYMMDD')::INT AS date_key,
+    local_date_key(t.candle_time_utc)           AS date_key,
     t.symbol_id,
     t.source_id,
     t.interval_id,
     t.candle_time_utc,
-    (t.candle_time_utc AT TIME ZONE 'Europe/Berlin') AS candle_time_local,
-    EXTRACT(HOUR FROM t.candle_time_utc)::INT   AS hour_utc,
+    local_ts(t.candle_time_utc)                 AS candle_time_local,
+    local_date(t.candle_time_utc)               AS trade_date,
+    EXTRACT(HOUR FROM local_ts(t.candle_time_utc))::INT AS hour_local,
+    -- AT TIME ZONE 'UTC' is not redundant: EXTRACT on a TIMESTAMPTZ
+    -- resolves in the SESSION's zone, so with the session set to Berlin
+    -- this returned the Berlin hour under a column called hour_utc.
+    EXTRACT(HOUR FROM (t.candle_time_utc AT TIME ZONE 'UTC'))::INT AS hour_utc,
     t.open, t.high, t.low, t.close, t.volume
 FROM fact_market_timeseries t
 JOIN dim_interval i ON i.interval_id = t.interval_id
@@ -203,10 +271,10 @@ WHERE i.interval_code IN ('1min', '5min');
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_indicator_daily AS
 SELECT
-    TO_CHAR(f.candle_time_utc, 'YYYYMMDD')::INT              AS date_key,
+    local_date_key(f.candle_time_utc)                        AS date_key,
     f.symbol_id,
     f.interval_id,
-    f.candle_time_utc::DATE                                  AS trade_date,
+    local_date(f.candle_time_utc)                            AS trade_date,
 
     MAX(CASE WHEN i.indicator_name = 'RSI'  THEN f.value END)       AS rsi_14,
     MAX(CASE WHEN i.indicator_name = 'EMA'  THEN f.value END)       AS ema_20,
@@ -249,11 +317,14 @@ GROUP BY 1, 2, 3, 4;
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_quote_latest AS
 SELECT DISTINCT ON (q.symbol_id)
-    TO_CHAR(COALESCE(q.quote_time_utc, q.fetched_at_utc), 'YYYYMMDD')::INT AS date_key,
+    local_date_key(COALESCE(q.quote_time_utc, q.fetched_at_utc)) AS date_key,
     q.symbol_id,
     q.source_id,
     q.quote_time_utc,
     q.fetched_at_utc,
+    local_ts(q.quote_time_utc)   AS quote_time_local,
+    local_ts(q.fetched_at_utc)   AS fetched_at_local,
+    local_date(COALESCE(q.quote_time_utc, q.fetched_at_utc)) AS quote_date,
     q.price,
     q.open, q.high, q.low,
     q.previous_close,
@@ -275,12 +346,15 @@ ORDER BY q.symbol_id, q.fetched_at_utc DESC;
 -- Full quote history (for time-series visuals)
 CREATE OR REPLACE VIEW bi_fact_quote_history AS
 SELECT
-    TO_CHAR(COALESCE(q.quote_time_utc, q.fetched_at_utc), 'YYYYMMDD')::INT AS date_key,
+    local_date_key(COALESCE(q.quote_time_utc, q.fetched_at_utc)) AS date_key,
     q.quote_id,
     q.symbol_id,
     q.source_id,
     q.quote_time_utc,
     q.fetched_at_utc,
+    local_ts(q.quote_time_utc)   AS quote_time_local,
+    local_ts(q.fetched_at_utc)   AS fetched_at_local,
+    local_date(COALESCE(q.quote_time_utc, q.fetched_at_utc)) AS quote_date,
     q.price, q.open, q.high, q.low, q.previous_close, q.change, q.change_pct
 FROM fact_market_quote q;
 
@@ -290,10 +364,14 @@ FROM fact_market_quote q;
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_fundamental_latest AS
 SELECT DISTINCT ON (f.symbol_id)
-    TO_CHAR(f.fetched_at_utc, 'YYYYMMDD')::INT AS date_key,
+    local_date_key(f.fetched_at_utc) AS date_key,
     f.symbol_id,
     f.source_id,
     f.fetched_at_utc,
+    local_ts(f.fetched_at_utc)       AS fetched_at_local,
+    local_date(f.fetched_at_utc)     AS fetched_date,
+    -- An attribute of the company, not a date to slice by: Apple listed in
+    -- 1980 and bi_dim_date deliberately does not stretch back to cover it.
     f.ipo_date,
     f.market_cap,
     f.share_outstanding,
@@ -347,7 +425,8 @@ SELECT
         WHEN e.eps_actual <  e.eps_estimate      THEN 'Miss'
         ELSE 'In Line'
     END AS earnings_result,
-    (e.report_date >= CURRENT_DATE) AS is_upcoming
+    (e.report_date >= local_today()) AS is_upcoming,
+    (e.report_date - local_today())  AS days_until_report
 FROM fact_earnings_calendar e
 WHERE e.report_date IS NOT NULL;
 
@@ -357,13 +436,17 @@ WHERE e.report_date IS NOT NULL;
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_api_call AS
 SELECT
-    TO_CHAR(l.called_at_utc, 'YYYYMMDD')::INT AS date_key,
+    local_date_key(l.called_at_utc)           AS date_key,
     l.log_id,
     l.source_id,
     l.symbol_id,
     l.called_at_utc,
-    (l.called_at_utc AT TIME ZONE 'Europe/Berlin') AS called_at_local,
-    EXTRACT(HOUR FROM l.called_at_utc)::INT   AS hour_utc,
+    local_ts(l.called_at_utc)                 AS called_at_local,
+    local_date(l.called_at_utc)               AS called_date,
+    EXTRACT(HOUR FROM local_ts(l.called_at_utc))::INT AS hour_local,
+    -- See the note on hour_utc in bi_fact_price_intraday: the session's
+    -- zone, not UTC, is what EXTRACT uses on a TIMESTAMPTZ.
+    EXTRACT(HOUR FROM (l.called_at_utc AT TIME ZONE 'UTC'))::INT AS hour_utc,
     COALESCE(l.endpoint, 'unknown')           AS endpoint,
     l.http_status,
     l.response_ms,
@@ -395,9 +478,17 @@ FROM log_api_call l;
 CREATE OR REPLACE VIEW bi_pipeline_health AS
 SELECT
     (SELECT COUNT(*) FROM dim_symbol)                                       AS symbols_tracked,
+    -- The clock this whole model reports in, carried as data so the
+    -- dashboard and any report can label a timestamp without hardcoding it.
+    app_timezone()                                                          AS display_timezone,
+    local_ts(NOW())                                                         AS as_of_local,
+    NOW()                                                                   AS as_of_utc,
     (SELECT MAX(fetched_at_utc) FROM fact_market_quote)                     AS last_quote_at,
+    local_ts((SELECT MAX(fetched_at_utc) FROM fact_market_quote))           AS last_quote_at_local,
     (SELECT MAX(candle_time_utc) FROM fact_market_timeseries)               AS last_candle_at,
+    local_ts((SELECT MAX(candle_time_utc) FROM fact_market_timeseries))     AS last_candle_at_local,
     (SELECT MAX(called_at_utc) FROM log_api_call)                           AS last_api_call_at,
+    local_ts((SELECT MAX(called_at_utc) FROM log_api_call))                 AS last_api_call_at_local,
     EXTRACT(EPOCH FROM (NOW() - (SELECT MAX(fetched_at_utc)
                                  FROM fact_market_quote))) / 60             AS quote_age_minutes,
     (SELECT COUNT(*) FROM log_api_call
@@ -421,12 +512,15 @@ SELECT
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW bi_fact_pipeline_run AS
 SELECT
-    TO_CHAR(r.started_at_utc, 'YYYYMMDD')::INT AS date_key,
+    local_date_key(r.started_at_utc) AS date_key,
     r.run_id,
     r.run_uid,
     COALESCE(r.trigger_source, 'unknown') AS trigger_source,
     r.started_at_utc,
     r.finished_at_utc,
+    local_ts(r.started_at_utc)       AS started_at_local,
+    local_ts(r.finished_at_utc)      AS finished_at_local,
+    local_date(r.started_at_utc)     AS run_date,
     r.duration_seconds,
     r.status,
     r.symbols_total,

@@ -36,6 +36,17 @@ class SchemaMissing(Exception):
     """The database is reachable but the pipeline's tables are not there."""
 
 
+def app_timezone() -> str:
+    """
+    The one zone this service reads and displays in.
+
+    The web service has its own environment on Render and does not import
+    pipeline.config, so the default is repeated here rather than shared
+    through an import that would drag the whole ETL package into the image.
+    """
+    return os.getenv("APP_TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin"
+
+
 def database_url() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
     if url:
@@ -77,6 +88,12 @@ def get_pool() -> pg_pool.ThreadedConnectionPool:
                 maxconn=int(os.getenv("WEB_DB_POOL_MAX", "4")),
                 dsn=url,
                 connect_timeout=10,
+                # Every connection in the pool opens in the configured
+                # zone, so NOW(), CURRENT_DATE and `timestamptz::date`
+                # agree with what the page displays. As a startup option
+                # rather than a SET, because a pooled connection does not
+                # carry a SET from one transaction to the next.
+                options=f"-c TimeZone={app_timezone()}",
                 # Keeps a spun-down free instance from inheriting a dead
                 # socket when Render wakes it up again.
                 keepalives=1,

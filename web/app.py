@@ -15,6 +15,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template
 
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 HEALTH_SQL = "SELECT * FROM bi_pipeline_health"
 
 LAST_RUNS_SQL = """
-    SELECT run_uid, trigger_source, status, started_at_utc, finished_at_utc,
+    SELECT run_uid, trigger_source, status,
+           started_at_local, finished_at_local,
            duration_seconds, symbols_ok, symbols_failed, rows_written,
            NULLIF(error_msg, '') AS error_msg
       FROM bi_fact_pipeline_run
@@ -39,7 +41,7 @@ LAST_RUNS_SQL = """
 QUOTES_SQL = """
     SELECT s.symbol_code, s.company_name, s.sector, s.market_cap_band,
            q.price, q.change, q.change_pct, q.move_category,
-           q.fetched_at_utc, ROUND(q.minutes_since_update) AS age_minutes
+           q.fetched_at_local, ROUND(q.minutes_since_update) AS age_minutes
       FROM bi_fact_quote_latest q
       JOIN bi_dim_symbol s USING (symbol_id)
      ORDER BY s.symbol_code
@@ -51,7 +53,7 @@ SOURCES_SQL = """
            SUM(c.is_success)                          AS ok,
            SUM(c.is_failure)                          AS failed,
            ROUND(AVG(c.response_ms))                  AS avg_ms,
-           MAX(c.called_at_utc)                       AS last_call
+           MAX(c.called_at_local)                     AS last_call
       FROM bi_fact_api_call c
       JOIN bi_dim_source src USING (source_id)
      WHERE c.called_at_utc > NOW() - INTERVAL '24 hours'
@@ -60,7 +62,7 @@ SOURCES_SQL = """
 """
 
 ERRORS_SQL = """
-    SELECT c.called_at_utc, src.source_label AS source, c.endpoint,
+    SELECT c.called_at_local, src.source_label AS source, c.endpoint,
            c.http_status, c.status_category, LEFT(c.error_msg, 120) AS error_msg
       FROM bi_fact_api_call c
       LEFT JOIN bi_dim_source src USING (source_id)
@@ -83,6 +85,30 @@ COVERAGE_SQL = """
 
 
 # ------------------------------------------------------------------ helpers
+def _display_zone() -> ZoneInfo:
+    """
+    The zone the page reads in.
+
+    Falls back to UTC rather than raising: a mistyped APP_TIMEZONE should
+    cost a wrong label, not a 500 on every request.
+    """
+    try:
+        return ZoneInfo(db.app_timezone())
+    except Exception:  # unknown zone name, or no tzdata in the image
+        logger.warning("unknown APP_TIMEZONE %r, showing UTC", db.app_timezone())
+        return timezone.utc
+
+
+def _timezone_label() -> str:
+    """
+    "CET" or "CEST", whichever applies today -- not a fixed string.
+
+    Berlin is +01:00 for part of the year and +02:00 for the rest, so a
+    hardcoded label is wrong for about seven months of it.
+    """
+    return datetime.now(_display_zone()).strftime("%Z") or "UTC"
+
+
 def _jsonable(value):
     if isinstance(value, Decimal):
         return float(value)
@@ -148,7 +174,12 @@ def collect() -> dict:
         "errors": db.query(ERRORS_SQL),
         "coverage": db.query(COVERAGE_SQL),
         "max_age_min": float(os.getenv("MAX_QUOTE_AGE_MIN", "90")),
-        "generated_at": datetime.now(timezone.utc),
+        # The page clock. Every other timestamp on the page comes out of
+        # the database already converted (the *_local columns), so this one
+        # has to be in the same zone or the masthead contradicts the tables.
+        "generated_at": datetime.now(_display_zone()),
+        "timezone_label": _timezone_label(),
+        "timezone_name": db.app_timezone(),
     }
 
 
@@ -285,6 +316,11 @@ def create_app() -> Flask:
             "state": data["state"],
             "reason": data["reason"],
             "generated_at": data["generated_at"].isoformat(),
+            # An ISO timestamp with an offset is unambiguous, but a consumer
+            # still has to be told which clock the *_local columns below are
+            # on, because those carry no offset at all.
+            "timezone": data["timezone_name"],
+            "timezone_label": data["timezone_label"],
             "health": {k: _jsonable(v) for k, v in data["health"].items()},
             "runs": _clean(data["runs"]),
             "quotes": _clean(data["quotes"]),

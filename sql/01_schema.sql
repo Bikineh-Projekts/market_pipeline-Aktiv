@@ -6,6 +6,53 @@
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
+-- TIME ZONE
+--
+-- Instants are stored as TIMESTAMPTZ, which is an absolute point in time
+-- and carries no zone of its own. Only the display zone is configurable,
+-- and these three functions are the only place it is named.
+--
+-- Do not be tempted to store local time instead. On the last Sunday in
+-- October the Berlin wall clock reads 02:00-03:00 twice; a naive local
+-- timestamp inside that hour is genuinely ambiguous, no longer sorts
+-- correctly, and silently breaks every "latest row" query. Store the
+-- instant, display it in Berlin.
+--
+-- To report in another zone, change the literal here and re-run this file
+-- followed by 02_bi_views.sql. Set APP_TIMEZONE to the same value so the
+-- Python side and the dashboard agree.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION app_timezone() RETURNS TEXT
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$ SELECT 'Europe/Berlin'::text $$;
+
+-- The wall clock in that zone, as a naive timestamp. Naive on purpose:
+-- Power BI has no time-zone type, so a TIMESTAMPTZ arrives converted to
+-- whatever zone the report server happens to run in. A naive value is the
+-- only way to make the report show the same clock for everyone.
+CREATE OR REPLACE FUNCTION local_ts(ts TIMESTAMPTZ) RETURNS TIMESTAMP
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$ SELECT ts AT TIME ZONE app_timezone() $$;
+
+-- The calendar day that instant falls on locally. This is what decides
+-- which day a row is counted in: a quote fetched at 23:30 UTC belongs to
+-- the NEXT Berlin day, and using the UTC date files it under the wrong one.
+CREATE OR REPLACE FUNCTION local_date(ts TIMESTAMPTZ) RETURNS DATE
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$ SELECT (ts AT TIME ZONE app_timezone())::date $$;
+
+CREATE OR REPLACE FUNCTION local_date_key(ts TIMESTAMPTZ) RETURNS INT
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$ SELECT TO_CHAR(ts AT TIME ZONE app_timezone(), 'YYYYMMDD')::int $$;
+
+-- Today, and now, in the display zone -- independent of the session's own
+-- time zone, so a psql session or a pooled connection that forgot the
+-- startup option still agrees with the dashboard.
+CREATE OR REPLACE FUNCTION local_today() RETURNS DATE
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$ SELECT (NOW() AT TIME ZONE app_timezone())::date $$;
+
+-- ---------------------------------------------------------------------
 -- DIMENSIONS
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS dim_source (
@@ -163,6 +210,15 @@ CREATE TABLE IF NOT EXISTS log_pipeline_run (
 -- Older installs may predate these columns; add them without failing.
 ALTER TABLE log_api_call            ADD COLUMN IF NOT EXISTS run_id BIGINT;
 ALTER TABLE fact_company_fundamental ADD COLUMN IF NOT EXISTS fetched_date DATE DEFAULT CURRENT_DATE;
+
+-- CURRENT_DATE is the session's zone, which is the server's (UTC on
+-- Render) unless the client asked for another at startup. That made the
+-- uniqueness key of this table -- (symbol_id, source_id, fetched_date) --
+-- roll over at 01:00 or 02:00 Berlin instead of at midnight, so a run
+-- just before midnight and one just after wrote the same "day".
+-- local_today() does not depend on the session at all.
+ALTER TABLE fact_company_fundamental
+    ALTER COLUMN fetched_date SET DEFAULT local_today();
 
 -- ---------------------------------------------------------------------
 -- INDEXES
