@@ -56,6 +56,55 @@ one-line `.bat` in Task Scheduler does it:
   -c "SELECT * FROM pull_from_render();"
 ```
 
+### Making it automatic
+
+A pull you have to remember is not a backup. Two ways, neither needing
+anything installed:
+
+**Windows Task Scheduler** — `tools\install_auto_pull.cmd`. Edit
+`tools\auto_pull.cmd` so `LOCAL_DB` points at your database, then
+double-click the installer. It runs one pull first and refuses to schedule
+anything if that fails — a task that fails every fifteen minutes forever is
+worse than no task — and otherwise registers it to run every 15 minutes.
+
+```
+check it ran:   type tools\auto_pull.log
+check in SQL:   SELECT * FROM render_sync_status;
+stop it:        schtasks /Delete /TN "MarketPipeline Pull" /F
+```
+
+It runs while you are logged in, and it does not need to do more than
+that: the pull only ever copies rows it has not seen, so a machine that
+was off for a week simply catches up on the next run.
+
+`auto_pull.cmd` never handles the Render password. That already lives
+inside your database, in the user mapping; the task only connects to
+localhost and asks your own server to go and fetch.
+
+**pgAgent**, if you would rather see the job inside pgAdmin: install it
+from StackBuilder (it comes with the PostgreSQL Windows installer), then
+pgAdmin → your database → pgAgent Jobs → Create. One step, type SQL,
+code `SELECT * FROM pull_from_render();`, and a schedule of every 15
+minutes. It runs as a Windows service, so it does not need you logged in.
+
+### Why not logical replication, which would be automatic by itself
+
+Because Render will not do it on this plan, and the refusal you hit was
+real, not a mistake on your side. Per Render's own documentation: logical
+replication is **off by default**, the workspace must be on **Pro or
+higher**, the database must be at least **10 GB**, and Render support has
+to enable it for you. `CREATE PUBLICATION` on a free database cannot
+succeed.
+
+Logical replication is also the wrong shape for this even when available.
+It is a live stream, so a row deleted on the publisher is deleted on the
+subscriber — which is what you want from a replica and precisely not what
+you want from a backup. The pull only ever adds and updates, so when
+Render deletes the database at 30 days, everything it ever held is still
+in yours.
+
+`pg_cron`, the other obvious answer, does not run on Windows.
+
 ### If you have Python and this repository — `tools/local_setup.py`
 
 ```bash
