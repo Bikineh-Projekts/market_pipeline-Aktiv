@@ -1,39 +1,54 @@
 # =====================================================================
 #  Render Blueprint
 #
-#  Deploys the read-only status dashboard from this repository.
+#  Deploys the read-only status dashboard from this repository, built
+#  from the Dockerfile.
 #
 #  Render dashboard -> New -> Blueprint -> pick this repo. Render reads
-#  this file, creates the service, and asks for DATABASE_URL.
+#  this file, creates the service, and prompts for DATABASE_URL.
+#
+#  Creating the service by hand instead? Then this file is not used, and
+#  the two fields to fill in are:
+#      Build Command:  pip install -r requirements-web.txt
+#      Start Command:  gunicorn 'web.app:create_app()' --config web/gunicorn.conf.py
+#      Health Check Path: /health
+#  Note requirements-web.txt, not requirements.txt -- the latter has no
+#  Flask and no gunicorn, so the service would build and then fail to start.
 #
 #  WHAT THIS SERVICE DOES NOT DO
 #  It does not run the ETL and it does not create tables. GitHub Actions
-#  does both. Every database transaction here is opened READ ONLY, so this
+#  does both. Every database transaction here opens READ ONLY, so this
 #  process cannot write even by accident -- the previous version of this
 #  project called create_schema() from its index page, which meant two
 #  processes writing to one database, duplicating rows and spending the
 #  API quota twice as fast.
 #
+#  PYTHON VERSION
+#  The Dockerfile pins it (python:3.12-slim). If you ever switch this
+#  service to the native Python runtime, .python-version in the repo root
+#  is what Render reads -- without it, Render uses the newest release it
+#  offers, which is how a psycopg2-binary source build broke a deploy here.
+#
 #  FREE PLAN, HONESTLY
 #  A free instance spins down after 15 minutes without traffic, so the
-#  first visit afterwards takes a few seconds to wake. That is fine for a
-#  dashboard and needs no keep-alive ping: nothing depends on this service
-#  being awake, because it is not what collects the data.
+#  first visit afterwards takes a few seconds to wake. That is fine here
+#  and needs no keep-alive ping: nothing depends on this service being
+#  awake, because it is not what collects the data.
 # =====================================================================
 
 services:
   - type: web
     name: market-pipeline-status
-    runtime: python
+    runtime: docker
     plan: free
-    region: frankfurt          # put it near the database to keep latency low
+    region: frankfurt          # same region as the database keeps latency low
     branch: main
 
-    buildCommand: pip install -r requirements-web.txt
-    startCommand: gunicorn 'web.app:create_app()' --config web/gunicorn.conf.py
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
 
     # Render restarts the instance if this path stops returning 200. It
-    # checks the database, so a broken connection is visible here rather
+    # checks the database, so a broken connection shows up here rather
     # than only when someone opens the page.
     healthCheckPath: /health
 
@@ -43,12 +58,9 @@ services:
       #
       # Use the EXTERNAL database URL with ?sslmode=require. The internal
       # hostname resolves only inside Render, and GitHub Actions -- which
-      # uses the same secret -- is outside.
+      # uses the same value as a repository secret -- is outside.
       - key: DATABASE_URL
         sync: false
-
-      - key: PYTHON_VERSION
-        value: "3.11"
 
       # Minutes before the newest quote counts as stale. Matches the
       # monitor's default so both agree on what "stale" means.

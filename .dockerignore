@@ -1,0 +1,51 @@
+# Everything the web image does not need, plus everything that must never
+# end up inside an image. A smaller build context also uploads faster to
+# Render's builder on every deploy.
+
+# --- never ship credentials ------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+status.json
+
+# --- git and CI -------------------------------------------------------
+.git
+.gitignore
+.github
+
+# --- the ETL side, which this image deliberately does not contain -----
+pipeline/
+sql/
+monitor/
+tools/
+tests/
+docs/
+requirements-dev.txt
+pytest.ini
+render.yaml
+*.md
+*.dax
+*.xlsx
+
+# --- python and editor noise ------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+
+# --- node, from the monitor -------------------------------------------
+node_modules/
+package-lock.json
+
+# --- build output ------------------------------------------------------
+*.dump
+*.sql.gz
