@@ -15,12 +15,48 @@ it exists. That is not a limitation to be fixed — a database anyone on the
 internet could write to is a database anyone on the internet could empty.
 
 So data appears in your Postgres only when something **on your machine**
-goes and fetches it. That something is `tools/replicate.py`, and until you
-start it, your tables stay exactly as empty as the day you created them,
-however healthy the Render side is.
+goes and fetches it. Until you start that, your tables stay exactly as
+empty as the day you created them, however healthy the Render side is.
 
-If nothing has arrived, the first question is not "what broke" — it is
-"is the replicator running". Start here:
+There are two ways to start it. Pick by what you have installed.
+
+### If you only have pgAdmin — `sql/06_pull_from_render.sql`
+
+Nothing to install. Your PostgreSQL opens its own connection to the Render
+one (`postgres_fdw`, which ships with every standard PostgreSQL) and does
+the fetching itself.
+
+1. Open `sql/06_pull_from_render.sql` and edit the four values marked
+   **CHANGE ME** — hostname, database, user, password, all from Render →
+   your Postgres → Connections, the **External** ones.
+2. pgAdmin → your database → Query Tool → paste the whole file → **F5**.
+   Once.
+3. From then on, whenever you want the newest rows:
+
+   ```sql
+   SELECT * FROM pull_from_render();
+   ```
+
+   and to see how current you are:
+
+   ```sql
+   SELECT * FROM render_sync_status;
+   ```
+
+It returns a row per table with `rows_added` and `rows_updated`, so a pull
+that found nothing says so plainly — all zeros.
+
+To run it on a timer without any Python: PostgreSQL ships `psql` even if
+you never use it, at `C:\Program Files\PostgreSQL\16\bin\psql.exe`. A
+one-line `.bat` in Task Scheduler does it:
+
+```bat
+"C:\Program Files\PostgreSQL\16\bin\psql.exe" ^
+  "postgresql://postgres:PASSWORT@localhost:5432/marketdb" ^
+  -c "SELECT * FROM pull_from_render();"
+```
+
+### If you have Python and this repository — `tools/local_setup.py`
 
 ```bash
 python tools/local_setup.py \
@@ -31,6 +67,11 @@ python tools/local_setup.py \
 That creates the tables, fills them once, and tells you what to run to
 keep them current. It is safe to run again, and it explains what to do
 rather than printing a stack trace when it cannot connect.
+
+The two do the same job and can be used interchangeably; the SQL one keeps
+its own bookmark in `render_sync_state`, the Python one in
+`replication_state`, so switching between them re-reads a little but
+duplicates nothing.
 
 ---
 
