@@ -44,18 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client 16
-        run: |
-          # The runner's default client can be older than the server, and
-          # pg_dump refuses to dump a newer server than itself.
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt \
-            $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-16
-          pg_dump --version
-
+      # The connection string is resolved first, because the client version
+      # to install depends on what the server reports.
       - name: Resolve the connection string
         run: |
           if [ -z "$DATABASE_URL" ] && [ -z "$DATABASE_URL_DIRECT" ]; then
@@ -73,6 +63,36 @@ jobs:
 
           echo "::add-mask::$DUMP_URL"
           echo "DUMP_URL=$DUMP_URL" >> "$GITHUB_ENV"
+
+      - name: Install a pg_dump matching the server
+        run: |
+          # pg_dump refuses to dump a server NEWER than itself, while psql
+          # connects to it happily. Pinning a client version therefore works
+          # until the host upgrades Postgres and then fails with an error
+          # that never reaches the run page. So: ask the server, install that.
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update -qq
+
+          # The preinstalled psql is enough to ask the version question.
+          SERVER=$(psql "$DUMP_URL" -tAc "SHOW server_version_num;" 2>/dev/null || echo "")
+          if [ -z "$SERVER" ]; then
+            echo "::error title=Cannot reach the database::psql could not connect, so the server version is unknown."
+            exit 1
+          fi
+
+          MAJOR=$((SERVER / 10000))
+          echo "Server reports PostgreSQL $MAJOR (server_version_num=$SERVER)"
+
+          if ! sudo apt-get install -y -qq "postgresql-client-$MAJOR" 2>/dev/null; then
+            echo "::warning::No postgresql-client-$MAJOR package; falling back to the newest available."
+            sudo apt-get install -y -qq postgresql-client
+          fi
+
+          echo "CLIENT_BIN=/usr/lib/postgresql/$MAJOR/bin" >> "$GITHUB_ENV"
+          "/usr/lib/postgresql/$MAJOR/bin/pg_dump" --version 2>/dev/null || pg_dump --version
 
       - name: Record what we are backing up
         run: |
@@ -99,14 +119,26 @@ jobs:
             FILE="market_pipeline-schema-${STAMP}.dump"
           fi
 
+          PGDUMP="${CLIENT_BIN:-/usr/bin}/pg_dump"
+          [ -x "$PGDUMP" ] || PGDUMP=pg_dump
+
           # --no-owner and --no-privileges matter: the role names on a new
-          # Render database differ, and without these the restore fails on
-          # every ALTER ... OWNER TO line.
-          pg_dump "$DUMP_URL" $FLAGS --file="$FILE"
+          # database differ, and without these the restore fails on every
+          # ALTER ... OWNER TO line.
+          #
+          # stderr is captured so a failure becomes an annotation. Without
+          # this the step reported only "exit code 1" and the reason stayed
+          # in a log that cannot always be fetched.
+          if ! "$PGDUMP" "$DUMP_URL" $FLAGS --file="$FILE" 2> /tmp/dump.err; then
+            echo "::error title=pg_dump failed::$(tail -3 /tmp/dump.err | tr '\n' ' ' | cut -c1-400)"
+            echo "--- pg_dump stderr ---"
+            cat /tmp/dump.err
+            exit 1
+          fi
 
           SIZE=$(du -h "$FILE" | cut -f1)
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
-          echo "Wrote $FILE ($SIZE)"
+          echo "::notice title=Backup written::$FILE ($SIZE)"
 
       - name: Verify the dump is readable
         run: |
