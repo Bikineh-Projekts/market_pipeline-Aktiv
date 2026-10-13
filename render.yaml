@@ -1,0 +1,66 @@
+# =====================================================================
+#  Render Blueprint
+#
+#  Deploys the read-only status dashboard from this repository.
+#
+#  Render dashboard -> New -> Blueprint -> pick this repo. Render reads
+#  this file, creates the service, and asks for DATABASE_URL.
+#
+#  WHAT THIS SERVICE DOES NOT DO
+#  It does not run the ETL and it does not create tables. GitHub Actions
+#  does both. Every database transaction here is opened READ ONLY, so this
+#  process cannot write even by accident -- the previous version of this
+#  project called create_schema() from its index page, which meant two
+#  processes writing to one database, duplicating rows and spending the
+#  API quota twice as fast.
+#
+#  FREE PLAN, HONESTLY
+#  A free instance spins down after 15 minutes without traffic, so the
+#  first visit afterwards takes a few seconds to wake. That is fine for a
+#  dashboard and needs no keep-alive ping: nothing depends on this service
+#  being awake, because it is not what collects the data.
+# =====================================================================
+
+services:
+  - type: web
+    name: market-pipeline-status
+    runtime: python
+    plan: free
+    region: frankfurt          # put it near the database to keep latency low
+    branch: main
+
+    buildCommand: pip install -r requirements-web.txt
+    startCommand: gunicorn 'web.app:create_app()' --config web/gunicorn.conf.py
+
+    # Render restarts the instance if this path stops returning 200. It
+    # checks the database, so a broken connection is visible here rather
+    # than only when someone opens the page.
+    healthCheckPath: /health
+
+    envVars:
+      # Not in this file and not in the repo. Render prompts for it on the
+      # first deploy and stores it encrypted.
+      #
+      # Use the EXTERNAL database URL with ?sslmode=require. The internal
+      # hostname resolves only inside Render, and GitHub Actions -- which
+      # uses the same secret -- is outside.
+      - key: DATABASE_URL
+        sync: false
+
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+      # Minutes before the newest quote counts as stale. Matches the
+      # monitor's default so both agree on what "stale" means.
+      - key: MAX_QUOTE_AGE_MIN
+        value: "90"
+
+      # Per gunicorn worker. With 2 workers that is at most 8 connections,
+      # which stays well inside a free database's allowance.
+      - key: WEB_DB_POOL_MAX
+        value: "4"
+
+      - key: WEB_WORKERS
+        value: "2"
+      - key: WEB_THREADS
+        value: "2"

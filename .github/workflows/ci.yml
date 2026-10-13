@@ -53,7 +53,7 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install -r requirements-dev.txt -r requirements-web.txt
 
       - name: Run the test suite
         run: python -m pytest -v
@@ -74,7 +74,7 @@ jobs:
           node-version: "20"
 
       - name: Python compiles
-        run: python -m compileall -q pipeline tests
+        run: python -m compileall -q pipeline web tests
 
       - name: Workflows are valid YAML
         run: |
@@ -111,6 +111,25 @@ jobs:
 
       - name: Monitor parses
         run: node --check monitor/monitor.mjs
+
+      - name: Render blueprint is valid YAML
+        run: |
+          python - <<'PY'
+          import sys, yaml
+          spec = yaml.safe_load(open("render.yaml"))
+          services = spec.get("services") or []
+          if not services:
+              print("::error::render.yaml defines no services"); sys.exit(1)
+          svc = services[0]
+          for field in ("type", "name", "buildCommand", "startCommand", "healthCheckPath"):
+              if field not in svc:
+                  print(f"::error::render.yaml service is missing {field}"); sys.exit(1)
+          # The old project pinged /healt for months and never noticed.
+          if svc["healthCheckPath"] != "/health":
+              print(f"::error::healthCheckPath is {svc['healthCheckPath']}, expected /health")
+              sys.exit(1)
+          print(f"render.yaml OK: {svc['name']} ({svc['type']}), health at {svc['healthCheckPath']}")
+          PY
 
       - name: No credentials committed
         run: python tools/check_no_credentials.py

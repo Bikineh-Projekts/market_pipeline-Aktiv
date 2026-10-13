@@ -1,0 +1,4 @@
+# Web dashboard only. The ETL needs just requirements.txt.
+-r requirements.txt
+Flask==3.0.3
+gunicorn==22.0.0
