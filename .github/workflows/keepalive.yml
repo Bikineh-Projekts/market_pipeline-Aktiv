@@ -62,15 +62,13 @@ jobs:
     steps:
       - name: Ping the dashboard
         env:
-          # Set this as an Actions *variable* (not a secret) -- it is a
-          # public URL. Without it this job does nothing rather than
-          # guessing an address.
-          URL: ${{ vars.RENDER_URL }}
+          # The deployed dashboard. This is a public web address, not a
+          # secret, so it has a default and the workflow works out of the
+          # box; set a RENDER_URL Actions variable to point it elsewhere.
+          URL: ${{ vars.RENDER_URL || 'https://market-pipeline-aktiv.onrender.com' }}
         run: |
           if [ -z "$URL" ]; then
-            echo "::notice::RENDER_URL variable is not set, so there is nothing to ping."
-            echo "Settings -> Secrets and variables -> Actions -> Variables tab,"
-            echo "name RENDER_URL, value https://your-service.onrender.com"
+            echo "::notice::No URL to ping."
             exit 0
           fi
 

@@ -8,6 +8,9 @@ name: Database
 #     migrate   create tables, indexes and BI views. Safe to re-run.
 #     backfill  load deep price history, then verify.
 #     verify    print row counts and storage use. Changes nothing.
+#     audit     20 data-quality checks: freshness, grain, orphans,
+#               NULL slicer columns, derived-value arithmetic.
+#               Read-only; fails the run on any FAIL.
 #     reset     drop only the bi_* views and rebuild them. Data untouched.
 #
 # Pooled vs direct endpoint:
@@ -26,7 +29,7 @@ on:
         type: choice
         required: true
         default: migrate
-        options: [migrate, backfill, verify, reset]
+        options: [migrate, backfill, verify, audit, reset]
       symbols:
         description: "Symbols for backfill"
         required: false
@@ -131,7 +134,7 @@ jobs:
           echo "Views dropped. Tables and data untouched."
 
       - name: Apply schema and views
-        if: inputs.action != 'verify'
+        if: inputs.action != 'verify' && inputs.action != 'audit'
         run: |
           psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
           psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q -f sql/02_bi_views.sql
@@ -160,6 +163,53 @@ jobs:
             --backfill ${{ inputs.history }} \
             --full \
             --trigger github-actions-backfill
+
+      - name: Audit data quality
+        if: inputs.action == 'audit'
+        run: |
+          # Row counts say whether anything arrived. These checks say
+          # whether what arrived is correct -- a NULL company_name loads
+          # fine and empties every Power BI slicer, and a duplicated grain
+          # silently doubles every measure.
+          psql "$ADMIN_URL" -f sql/04_audit.sql | tee /tmp/audit.txt
+
+          # Machine-readable pass for the annotations and the exit code.
+          psql "$ADMIN_URL" -t -A -F'|' -f sql/04_audit.sql 2>/dev/null \
+            | grep -E '^(OK|WARN|FAIL)\|' > /tmp/audit.psv || true
+
+          FAILED=$(grep -c '^FAIL|' /tmp/audit.psv || true)
+          WARNED=$(grep -c '^WARN|' /tmp/audit.psv || true)
+          PASSED=$(grep -c '^OK|'   /tmp/audit.psv || true)
+
+          while IFS='|' read -r verdict name detail; do
+            case "$verdict" in
+              FAIL) echo "::error title=$name::$detail" ;;
+              WARN) echo "::warning title=$name::$detail" ;;
+            esac
+          done < /tmp/audit.psv
+
+          {
+            echo "## Data quality audit"
+            echo ""
+            echo "| | check | detail |"
+            echo "| --- | --- | --- |"
+            while IFS='|' read -r verdict name detail; do
+              case "$verdict" in
+                OK)   icon="✅" ;;
+                WARN) icon="⚠️" ;;
+                *)    icon="❌" ;;
+              esac
+              echo "| $icon | $name | $detail |"
+            done < /tmp/audit.psv
+            echo ""
+            echo "**$PASSED passed · $WARNED warnings · $FAILED failures**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error title=Audit failed::$FAILED check(s) failed, $WARNED warning(s)"
+            exit 1
+          fi
+          echo "::notice title=Audit passed::$PASSED checks passed, $WARNED warning(s)"
 
       - name: Verify
         if: always() && env.ADMIN_URL != ''
