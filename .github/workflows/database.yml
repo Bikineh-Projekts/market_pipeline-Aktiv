@@ -180,7 +180,7 @@ jobs:
           SELECT table_name FROM information_schema.views
            WHERE table_schema = 'public' AND table_name LIKE 'bi\_%' ORDER BY 1;
 
-          \echo '=== storage (Neon free plan cap = 512 MB) ==='
+          \echo '=== storage ==='
           SELECT pg_size_pretty(pg_database_size(current_database())) AS used;
 
           \echo '=== last runs ==='
@@ -194,3 +194,51 @@ jobs:
            WHERE http_status IS NULL OR http_status >= 400
            ORDER BY called_at_utc DESC LIMIT 5;
           SQL
+
+      - name: Summarise what is in the database
+        if: always() && env.ADMIN_URL != ''
+        run: |
+          # The tables above go to the raw log, which takes several clicks to
+          # reach and cannot always be fetched through the API at all. These
+          # same numbers as a notice annotation and a job summary show up on
+          # the run page itself.
+          COUNTS=$(psql "$ADMIN_URL" -tAc "
+            SELECT string_agg(label || '=' || n, '  ' ORDER BY label) FROM (
+              SELECT 'symbols' AS label, COUNT(*) AS n FROM dim_symbol
+              UNION ALL SELECT 'quotes',      COUNT(*) FROM fact_market_quote
+              UNION ALL SELECT 'candles',     COUNT(*) FROM fact_market_timeseries
+              UNION ALL SELECT 'indicators',  COUNT(*) FROM fact_market_indicator
+              UNION ALL SELECT 'fundamentals',COUNT(*) FROM fact_company_fundamental
+              UNION ALL SELECT 'earnings',    COUNT(*) FROM fact_earnings_calendar
+              UNION ALL SELECT 'api_calls',   COUNT(*) FROM log_api_call
+              UNION ALL SELECT 'runs',        COUNT(*) FROM log_pipeline_run
+            ) x;")
+
+          FRESH=$(psql "$ADMIN_URL" -tAc "
+            SELECT COALESCE(
+              'newest quote ' || ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(fetched_at_utc)))/60) || ' min old',
+              'no quotes yet')
+            FROM fact_market_quote;")
+
+          SIZE=$(psql "$ADMIN_URL" -tAc "SELECT pg_size_pretty(pg_database_size(current_database()));")
+
+          echo "::notice title=Database contents::$COUNTS"
+          echo "::notice title=Freshness::$FRESH  ·  size $SIZE"
+
+          {
+            echo "## Database contents"
+            echo ""
+            psql "$ADMIN_URL" -P pager=off --html -c "
+              SELECT label AS \"table\", n AS rows FROM (
+                SELECT 'dim_symbol' AS label, COUNT(*) AS n FROM dim_symbol
+                UNION ALL SELECT 'fact_market_quote',        COUNT(*) FROM fact_market_quote
+                UNION ALL SELECT 'fact_market_timeseries',   COUNT(*) FROM fact_market_timeseries
+                UNION ALL SELECT 'fact_market_indicator',    COUNT(*) FROM fact_market_indicator
+                UNION ALL SELECT 'fact_company_fundamental', COUNT(*) FROM fact_company_fundamental
+                UNION ALL SELECT 'fact_earnings_calendar',   COUNT(*) FROM fact_earnings_calendar
+                UNION ALL SELECT 'log_api_call',             COUNT(*) FROM log_api_call
+                UNION ALL SELECT 'log_pipeline_run',         COUNT(*) FROM log_pipeline_run
+              ) x ORDER BY label;"
+            echo ""
+            echo "$FRESH · database size $SIZE"
+          } >> "$GITHUB_STEP_SUMMARY"
