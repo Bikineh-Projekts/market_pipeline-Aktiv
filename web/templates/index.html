@@ -1,0 +1,332 @@
+{% extends "base.html" %}
+
+{% block title %}{{ state|capitalize }} — market pipeline{% endblock %}
+
+{% block masthead_right %}Read {{ generated_at|dt }} UTC{% endblock %}
+
+{% block head %}
+<style>
+  /* --- the verdict, and the freshness budget ------------------------- */
+  .verdict {
+    margin-top: 2rem;
+    display: grid;
+    gap: 1.5rem 3rem;
+    grid-template-columns: 1fr;
+    align-items: end;
+  }
+  @media (min-width: 46rem) {
+    .verdict { grid-template-columns: minmax(0, 22rem) minmax(0, 1fr); }
+  }
+
+  .verdict .word {
+    font: 700 clamp(2.6rem, 9vw, 4.1rem)/0.95 Archivo, Inter, sans-serif;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .verdict .word.ok   { color: var(--ok); }
+  .verdict .word.warn { color: var(--warn); }
+  .verdict .word.bad  { color: var(--bad); }
+
+  .verdict .reason {
+    margin: .5rem 0 0;
+    color: var(--muted);
+    font-size: .95rem;
+    max-width: 34ch;
+  }
+
+  /* Freshness as a depleting budget: how much of the allowed staleness
+     has been used up. This is the number that decides whether anything
+     else on the page matters. */
+  .budget { min-width: 0; }
+  .budget .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+  .budget .age {
+    font: 500 1.35rem/1.2 Archivo, Inter, sans-serif;
+    color: var(--ink);
+  }
+  .track {
+    position: relative;
+    height: 10px;
+    margin-top: .55rem;
+    background: var(--rule);
+    overflow: hidden;
+  }
+  .fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--pct, 0%);
+    background: var(--ok);
+    animation: fill .7s cubic-bezier(.22,.7,.3,1) both;
+    transform-origin: left center;
+  }
+  .fill.warn { background: var(--warn); }
+  .fill.bad  { background: var(--bad); }
+  @keyframes fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @media (prefers-reduced-motion: reduce) {
+    .fill { animation: none; }
+  }
+
+  /* --- counters ------------------------------------------------------ */
+  .counters {
+    margin-top: 2.25rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--rule);
+    display: grid;
+    gap: 1.1rem 2rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  @media (min-width: 46rem) {
+    .counters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  .counters div { min-width: 0; }
+  .counters dt {
+    font-size: .8rem;
+    color: var(--muted);
+    margin-bottom: .15rem;
+  }
+  .counters dd {
+    margin: 0;
+    font: 500 1.25rem/1.2 Archivo, Inter, sans-serif;
+  }
+  /* Its own line: "34" beside "4 failed" reads as one number. */
+  .counters dd small {
+    display: block;
+    font: 400 .8rem/1.3 Inter, sans-serif;
+    color: var(--bad);
+    margin-top: .15rem;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{% set pct = health.quote_age_minutes|budget_pct(max_age_min) %}
+{% set tone = state|tone %}
+
+<div class="verdict">
+  <div>
+    <p class="word {{ tone }}">{{ state|capitalize }}</p>
+    <p class="reason">{{ reason }}.</p>
+  </div>
+
+  <div class="budget">
+    <div class="row">
+      <span>Newest quote</span>
+      <span>Stale after {{ max_age_min|int }} min</span>
+    </div>
+    <div class="row">
+      <span class="age">
+        {% if health.quote_age_minutes is none %}
+          no quotes yet
+        {% else %}
+          {{ health.quote_age_minutes|age }}
+        {% endif %}
+      </span>
+      <span>{{ pct|round|int }}% of budget used</span>
+    </div>
+    <div class="track">
+      <span class="fill {{ tone }}" style="--pct: {{ pct }}%"></span>
+    </div>
+  </div>
+</div>
+
+<dl class="counters">
+  <div>
+    <dt>Symbols tracked</dt>
+    <dd>{{ health.symbols_tracked or 0 }}</dd>
+  </div>
+  <div>
+    <dt>API calls, 24h</dt>
+    {# The failure count is only shown when there is one: "300" followed by
+       "0 failed" reads as "3000 failed" at a glance. #}
+    <dd>{{ "{:,}".format(health.api_calls_24h or 0) }}{% if health.api_errors_24h %}<small>{{ health.api_errors_24h }} failed</small>{% endif %}</dd>
+  </div>
+  <div>
+    <dt>Success rate, 24h</dt>
+    <dd>{% if health.success_rate_24h is none %}—{% else %}{{ health.success_rate_24h|round(1) }}%{% endif %}</dd>
+  </div>
+  <div>
+    {# total_candles counts every interval, not just daily -- the label has
+       to say so or the number contradicts the per-symbol table below. #}
+    <dt>Candles stored, all intervals</dt>
+    <dd>{{ "{:,}".format(health.total_candles or 0) }}</dd>
+  </div>
+</dl>
+
+<section>
+  <h2>Latest price per symbol</h2>
+  {% if quotes %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Company</th>
+          <th>Sector</th>
+          <th class="num">Price</th>
+          <th class="num">Change</th>
+          <th>Move</th>
+          <th class="num">Age</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in quotes %}
+        <tr>
+          <td class="sym">{{ q.symbol_code }}</td>
+          <td>{{ q.company_name }}</td>
+          <td class="dim">{{ q.sector }}</td>
+          <td class="num">{{ q.price|money }}</td>
+          <td class="num {{ 'up' if (q.change_pct or 0) > 0 else ('down' if (q.change_pct or 0) < 0 else '') }}">
+            {{ q.change_pct|pct }}
+          </td>
+          <td class="dim">{{ q.move_category }}</td>
+          <td class="num dim nowrap">{{ q.age_minutes|age }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No quotes yet. Run the ETL workflow in GitHub Actions to collect the first ones.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Recent runs</h2>
+  <p class="note">A run is <em>partial</em> when data arrived but one of the sources was broken, and <em>failed</em> when nothing arrived at all.</p>
+  {% if runs %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Started</th>
+          <th>Trigger</th>
+          <th>Status</th>
+          <th class="num">Symbols</th>
+          <th class="num">Rows</th>
+          <th class="num">Took</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td class="nowrap">{{ r.started_at_utc|dt }}</td>
+          <td class="dim">{{ r.trigger_source }}</td>
+          <td><span class="chip {{ r.status|run_tone }}">{{ r.status }}</span></td>
+          <td class="num">{{ r.symbols_ok }}{% if r.symbols_failed %} / {{ r.symbols_ok + r.symbols_failed }}{% endif %}</td>
+          <td class="num">{{ r.rows_written or 0 }}</td>
+          <td class="num dim nowrap">{% if r.duration_seconds %}{{ r.duration_seconds|round|int }}s{% else %}—{% endif %}</td>
+          <td class="dim">{{ r.error_msg or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No runs recorded yet.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Sources, last 24 hours</h2>
+  {% if sources %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th class="num">Calls</th>
+          <th class="num">Failed</th>
+          <th class="num">Success</th>
+          <th class="num">Avg latency</th>
+          <th class="num">Last call</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sources %}
+        <tr>
+          <td class="sym">{{ s.source }}</td>
+          <td class="num">{{ s.calls }}</td>
+          <td class="num {{ 'down' if s.failed else '' }}">{{ s.failed }}</td>
+          <td class="num">{{ (100 * s.ok / s.calls)|round|int if s.calls else 0 }}%</td>
+          <td class="num dim">{{ s.avg_ms|int if s.avg_ms is not none else "—" }} ms</td>
+          <td class="num dim nowrap">{{ s.last_call|dt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No API calls in the last 24 hours.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>History held per symbol</h2>
+  {% if coverage %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th class="num">Daily candles</th>
+          <th class="num">From</th>
+          <th class="num">To</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in coverage %}
+        <tr>
+          <td class="sym">{{ c.symbol_code }}</td>
+          <td class="num">{{ c.daily_candles }}</td>
+          <td class="num dim nowrap">{{ c.first_day|day }}</td>
+          <td class="num dim nowrap">{{ c.last_day|day }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No symbols yet.</p>
+  {% endif %}
+</section>
+
+{% if errors %}
+<section>
+  <h2>Failed API calls, last 48 hours</h2>
+  <p class="note">Every attempt is logged, including retries, so a flaky call appears more than once.</p>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Source</th>
+          <th>Endpoint</th>
+          <th class="num">Status</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in errors %}
+        <tr>
+          <td class="nowrap">{{ e.called_at_utc|dt }}</td>
+          <td>{{ e.source or "—" }}</td>
+          <td class="dim">{{ e.endpoint }}</td>
+          <td class="num down">{{ e.http_status or "—" }}</td>
+          <td class="dim">{{ e.error_msg or e.status_category }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

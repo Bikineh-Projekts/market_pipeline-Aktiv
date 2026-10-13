@@ -48,13 +48,60 @@ def _guard(url: str) -> None:
         )
 
 
+class _Database:
+    """
+    A connection that reconnects when it has been dropped.
+
+    The web tests terminate the database's backends on purpose, to prove the
+    dashboard survives a Render spin-down. That kills this connection too,
+    and a plain psycopg2 connection would then fail every later test with
+    "connection already closed".
+    """
+
+    def __init__(self, url: str):
+        self._url = url
+        self._conn = None
+
+    def _connect(self):
+        self._conn = psycopg2.connect(self._url, connect_timeout=10)
+        self._conn.autocommit = True
+        return self._conn
+
+    def cursor(self):
+        """
+        A usable cursor, reconnecting first if the socket is dead.
+
+        `conn.closed` is not enough: a connection killed from the server
+        side still reports itself as open, and the failure only surfaces on
+        the next execute. One cheap round-trip here is what makes the rest
+        of the suite immune to the web tests' spin-down simulation.
+        """
+        if self._conn is None or self._conn.closed:
+            self._connect()
+        else:
+            try:
+                with self._conn.cursor() as probe:
+                    probe.execute("SELECT 1")
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                self._connect()
+        return self._conn.cursor()
+
+    def close(self):
+        if self._conn is not None and not self._conn.closed:
+            self._conn.close()
+        self._conn = None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def database():
     """Apply the real schema files once, to the real thing."""
     _guard(TEST_URL)
 
+    handle = _Database(TEST_URL)
     try:
-        conn = psycopg2.connect(TEST_URL, connect_timeout=10)
+        with handle.cursor() as cur:
+            for name in ("sql/01_schema.sql", "sql/02_bi_views.sql"):
+                cur.execute((REPO / name).read_text())
     except psycopg2.OperationalError as exc:
         pytest.exit(
             f"Cannot reach the test database.\n  {TEST_URL.rsplit('@', 1)[-1]}\n"
@@ -62,12 +109,8 @@ def database():
             returncode=1,
         )
 
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        for name in ("sql/01_schema.sql", "sql/02_bi_views.sql"):
-            cur.execute((REPO / name).read_text())
-    yield conn
-    conn.close()
+    yield handle
+    handle.close()
 
 
 @pytest.fixture(autouse=True)

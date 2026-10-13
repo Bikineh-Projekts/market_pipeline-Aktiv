@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Pipeline status{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper:   #F7F8FA;
+    --panel:   #FFFFFF;
+    --ink:     #12161C;
+    --muted:   #5C6675;
+    --rule:    #D5DAE2;
+    --mark:    #2E4A7D;
+    --ok:      #1B7F5A;
+    --warn:    #9A6B00;
+    --bad:     #B3261E;
+    --ok-bg:   #E4F2EB;
+    --warn-bg: #F7EEDA;
+    --bad-bg:  #F8E6E4;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:   #0E1116;
+      --panel:   #151A21;
+      --ink:     #E6EAF0;
+      --muted:   #9AA4B2;
+      --rule:    #28303A;
+      --mark:    #8FB0E8;
+      --ok:      #5FCFA0;
+      --warn:    #E0B457;
+      --bad:     #F08076;
+      --ok-bg:   #15271F;
+      --warn-bg: #2A2316;
+      --bad-bg:  #2C1A18;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 16px/1.55 Inter, system-ui, -apple-system, sans-serif;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 68rem;
+    margin: 0 auto;
+    padding: 2.5rem 1rem 5rem;
+  }
+
+  @media (min-width: 48rem) {
+    .wrap { padding-left: 2rem; padding-right: 2rem; }
+  }
+
+  a { color: var(--mark); }
+
+  /* --- masthead ------------------------------------------------------ */
+  .masthead {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.25rem;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-bottom: .9rem;
+    border-bottom: 2px solid var(--ink);
+  }
+  .masthead h1 {
+    font: 700 1.05rem/1.2 Archivo, Inter, sans-serif;
+    letter-spacing: .005em;
+    margin: 0;
+  }
+  .masthead p { margin: 0; color: var(--muted); font-size: .85rem; }
+
+  /* --- sections ------------------------------------------------------ */
+  section { margin-top: 2.75rem; }
+  section > h2 {
+    font: 600 .95rem/1.3 Inter, sans-serif;
+    color: var(--mark);
+    margin: 0 0 .25rem;
+  }
+  section > h2 + p.note {
+    margin: 0 0 1rem;
+    color: var(--muted);
+    font-size: .85rem;
+    max-width: 62ch;
+  }
+  section > h2:not(:has(+ p.note)) { margin-bottom: 1rem; }
+
+  /* --- tables -------------------------------------------------------- */
+  .scroll { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .9rem;
+  }
+  thead th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--muted);
+    font-size: .78rem;
+    padding: 0 .75rem .5rem 0;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: .62rem .75rem .62rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .num { text-align: right; padding-right: 1.25rem; }
+  thead th.num { text-align: right; padding-right: 1.25rem; }
+  .sym { font-weight: 600; }
+  .dim { color: var(--muted); }
+  .nowrap { white-space: nowrap; }
+
+  /* --- state chips --------------------------------------------------- */
+  .chip {
+    display: inline-block;
+    padding: .1rem .45rem;
+    border-radius: 3px;
+    font-size: .78rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip.ok   { background: var(--ok-bg);   color: var(--ok); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn); }
+  .chip.bad  { background: var(--bad-bg);  color: var(--bad); }
+
+  .up   { color: var(--ok); }
+  .down { color: var(--bad); }
+
+  .empty {
+    color: var(--muted);
+    font-size: .9rem;
+    padding: .75rem 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: .8rem;
+  }
+  footer p { margin: .3rem 0; }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <h1>Market pipeline</h1>
+    <p>{% block masthead_right %}{% endblock %}</p>
+  </header>
+  {% block content %}{% endblock %}
+  <footer>
+    <p>Read-only. The ETL runs in GitHub Actions; this page only reads the database.</p>
+    <p>Machine-readable version at <a href="/api/status">/api/status</a>.</p>
+  </footer>
+</div>
+</body>
+</html>
