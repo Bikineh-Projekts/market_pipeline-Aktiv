@@ -27,7 +27,7 @@ rem Leave it EMPTY and the task falls back to the published export, which
 rem needs no Render credentials and keeps working after Render deletes the
 rem database at 30 days. Both end up with the same rows; the direct one is
 rem fresher, because it does not wait for an export to be built.
-set SOURCE=
+set SOURCE= postgresql://market_db_aktiv_user:DSKv0hRyCxS6JYp0nFtiRYUfUJUQru9L@dpg-db6rqu8n74is738po11g-a.frankfurt-postgres.render.com/market_db_aktiv
 
 rem ----------------------------------------------------------------------
 rem Everything is relative to this file, so the task works no matter what
