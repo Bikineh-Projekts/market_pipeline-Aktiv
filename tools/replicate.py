@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import pathlib
 import sys
 import time
 import urllib.error
@@ -67,6 +68,9 @@ from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from tools import pgconnect  # noqa: E402
 
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 
@@ -233,11 +237,14 @@ CREATE TABLE IF NOT EXISTS replication_state (
 
 # ------------------------------------------------------------------ helpers
 def connect(url: str, label: str, read_only: bool = False):
+    # Through pgconnect: a German or French PostgreSQL reports a refused
+    # password in its own language, and psycopg2 decodes that as UTF-8 and
+    # raises UnicodeDecodeError instead. The reason never reaches you.
     try:
-        conn = psycopg2.connect(
-            url, connect_timeout=15, options=f"-c TimeZone={APP_TIMEZONE}"
+        conn = pgconnect.connect_raw(
+            url, timeout=15, options=f"-c TimeZone={APP_TIMEZONE}"
         )
-    except psycopg2.OperationalError as exc:
+    except pgconnect.ConnectionFailed as exc:
         raise SystemExit(f"Cannot reach the {label} database:\n  {exc}") from exc
     conn.autocommit = False
     if read_only:

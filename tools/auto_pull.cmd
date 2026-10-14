@@ -17,6 +17,18 @@ rem If the password contains @ : / or # it must be percent-encoded:
 rem   @ is %%40   : is %%3A   / is %%2F   # is %%23
 set TARGET=postgresql://postgres:PASSWORD@localhost:5432/marketdb
 
+rem --- The RENDER database, if you want the two connected DIRECTLY -------
+rem Render dashboard -> your Postgres -> Connections -> EXTERNAL Database
+rem URL. Paste it here and this task copies Render straight into your
+rem database, with no file and no GitHub in between -- which is what you
+rem actually asked for.
+rem
+rem Leave it EMPTY and the task falls back to the published export, which
+rem needs no Render credentials and keeps working after Render deletes the
+rem database at 30 days. Both end up with the same rows; the direct one is
+rem fresher, because it does not wait for an export to be built.
+set SOURCE=
+
 rem ----------------------------------------------------------------------
 rem Everything is relative to this file, so the task works no matter what
 rem directory Windows starts it in -- which is not the one you are in now.
@@ -76,8 +88,17 @@ set /a HOUR=1%RAWHOUR%-100
 
 if defined DASHBOARD if %HOUR% GEQ 8 if %HOUR% LEQ 22 curl -s -o nul -m 20 "%DASHBOARD%/health"
 
-echo [%date% %time%] importing...>>"%LOGFILE%"
+if defined SOURCE goto :direct
+
+echo [%date% %time%] importing from the published export...>>"%LOGFILE%"
 python "%HERE%import_export.py" --target "%TARGET%" >>"%LOGFILE%" 2>&1
+goto :done
+
+:direct
+echo [%date% %time%] copying straight from Render...>>"%LOGFILE%"
+python "%HERE%replicate.py" --source "%SOURCE%" --target "%TARGET%" --once >>"%LOGFILE%" 2>&1
+
+:done
 
 if errorlevel 1 (
     echo [%date% %time%] FAILED - see the lines above.>>"%LOGFILE%"
