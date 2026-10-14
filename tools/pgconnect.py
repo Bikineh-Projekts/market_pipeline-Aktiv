@@ -48,6 +48,21 @@ class ConnectionFailed(Exception):
     """A connection error whose message survived a non-UTF-8 server."""
 
 
+def connect_raw(url: str, *, timeout: int = 15, **kwargs):
+    """connect(), for callers that set their own autocommit and options."""
+    try:
+        return psycopg2.connect(url, connect_timeout=timeout, **kwargs)
+    except UnicodeDecodeError as exc:
+        text = decode_server_bytes(bytes(exc.object)).strip()
+        raise ConnectionFailed(
+            f"{text}\n"
+            f"    (the server reported this in its own language; "
+            f"set lc_messages = 'C' in postgresql.conf to get English)"
+        ) from exc
+    except psycopg2.Error as exc:
+        raise ConnectionFailed(str(exc).strip()) from exc
+
+
 def connect(url: str, *, timeout: int = 15, autocommit: bool = False):
     """
     psycopg2.connect, with the server's own words preserved.
