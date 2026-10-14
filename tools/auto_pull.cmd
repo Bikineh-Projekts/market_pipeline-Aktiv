@@ -38,7 +38,24 @@ rem Leave it EMPTY and the task falls back to the published export, which
 rem needs no Render credentials and keeps working after Render deletes the
 rem database at 30 days. Both end up with the same rows; the direct one is
 rem fresher, because it does not wait for an export to be built.
+rem
+rem *** DO NOT PUT THE RENDER URL ON THE LINE BELOW. ***
+rem This file is tracked by git. A password typed here is a password
+rem published the moment you commit -- and this repository is public, so
+rem "I will delete it later" does not help: it stays in the history and
+rem has to be rotated at Render instead.
+rem
+rem Put it in tools\secrets.cmd, which .gitignore excludes and which this
+rem reads a few lines down. One line, no quotes needed around the whole
+rem assignment because the file is not parsed as a command line:
+rem
+rem     set "SOURCE=postgresql://user:password@host.../market_db_aktiv"
+rem
 set "SOURCE="
+
+rem Untracked, so the credential never reaches git. Missing is fine: the
+rem task falls back to the published export.
+if exist "%~dp0secrets.cmd" call "%~dp0secrets.cmd"
 
 rem ----------------------------------------------------------------------
 rem Everything is relative to this file, so the task works no matter what
