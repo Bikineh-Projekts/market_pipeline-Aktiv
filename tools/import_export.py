@@ -50,7 +50,6 @@ import urllib.request
 import zipfile
 import zlib
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import psycopg2
 import psycopg2.extras
@@ -408,6 +407,31 @@ def fix_sequences(cur) -> None:
         cur.execute(statement)
 
 
+
+def display_zone() -> tuple[object, str]:
+    """
+    The zone to print times in, and an honest label for it.
+
+    Windows ships no IANA time-zone database, so ZoneInfo("Europe/Berlin")
+    raises ZoneInfoNotFoundError there unless the `tzdata` package is
+    installed -- and it crashed this tool on the user's machine before it
+    had connected to anything, over a line that only prints a header.
+
+    Falling back to UTC, which the older tools here do, is worse than it
+    looks: they go on printing the label "Europe/Berlin" above times that
+    are two hours out. The system's own local zone is the better guess --
+    on the machine this runs on it IS Berlin -- and the label says which
+    one was actually used, so a wrong clock cannot pass for the right one.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(APP_TIMEZONE), APP_TIMEZONE
+    except Exception:
+        local = datetime.now().astimezone().tzinfo
+        name = datetime.now().astimezone().tzname() or "local time"
+        return local, f"{name} (system clock; pip install tzdata for {APP_TIMEZONE})"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Load the published export into your own PostgreSQL.")
@@ -425,8 +449,9 @@ def main(argv: list[str] | None = None) -> int:
               "  Or set LOCAL_DATABASE_URL.\n", file=sys.stderr)
         return 2
 
-    now = datetime.now(ZoneInfo(APP_TIMEZONE))
-    print(f"\n  {now:%Y-%m-%d %H:%M:%S} {APP_TIMEZONE}")
+    zone, zone_label = display_zone()
+    now = datetime.now(zone)
+    print(f"\n  {now:%Y-%m-%d %H:%M:%S} {zone_label}")
 
     try:
         src = Source(args.source)
