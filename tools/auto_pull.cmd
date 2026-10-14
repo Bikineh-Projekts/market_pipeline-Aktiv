@@ -49,6 +49,33 @@ rem Europe/Berlin. Both are no-ops once installed.
 python -c "import psycopg2" >nul 2>&1 || python -m pip install --quiet psycopg2-binary
 python -c "import tzdata"  >nul 2>&1 || python -m pip install --quiet tzdata
 
+rem --- keep the dashboard awake -----------------------------------------
+rem A free Render WEB SERVICE spins down after 15 minutes without traffic.
+rem The database does NOT -- Render spins down web services only -- so this
+rem changes nothing about whether data keeps flowing. It is about the
+rem status page opening instantly instead of after a minute.
+rem
+rem There is a keepalive workflow in GitHub Actions meant to do this, and
+rem it cannot: it asks for a ping every 14 minutes and GitHub delivered 4
+rem in a day. Against a 15-minute spin-down that leaves the page asleep
+rem essentially always. This task already runs every 15 minutes on a
+rem machine that is actually yours, which is the right cadence by accident.
+rem
+rem The window is deliberate. The free plan allows 750 instance-hours a
+rem month; awake around the clock is about 744 of them -- the whole
+rem allowance, for a page nobody reads at 04:00. 08:00-22:59 is about 465.
+rem Clear DASHBOARD to turn the ping off.
+set DASHBOARD=https://market-pipeline-aktiv.onrender.com
+
+rem Computed OUTSIDE any parenthesised block on purpose. cmd expands
+rem %VAR% when it PARSES a block, not when it runs it, so setting HOUR and
+rem reading it inside the same ( ) would read the previous run's value --
+rem empty on the first run, which is a syntax error, not a wrong answer.
+for /f "tokens=1 delims=:" %%H in ("%TIME: =0%") do set RAWHOUR=%%H
+set /a HOUR=1%RAWHOUR%-100
+
+if defined DASHBOARD if %HOUR% GEQ 8 if %HOUR% LEQ 22 curl -s -o nul -m 20 "%DASHBOARD%/health"
+
 echo [%date% %time%] importing...>>"%LOGFILE%"
 python "%HERE%import_export.py" --target "%TARGET%" >>"%LOGFILE%" 2>&1
 
