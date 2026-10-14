@@ -5,4 +5,4 @@ python-dotenv==1.0.1
 # Windows ships no IANA time-zone database, so zoneinfo cannot resolve
 # "Europe/Berlin" there and every tool that prints a local time raises
 # ZoneInfoNotFoundError. Harmless on Linux, where the marker skips it.
-tzdata==2026.2; platform_system == "Windows"
+tzdata==2026.5; platform_system == "Windows"
