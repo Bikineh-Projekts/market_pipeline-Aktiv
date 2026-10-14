@@ -163,6 +163,13 @@ jobs:
       - name: Dockerfile is sane
         run: python tools/check_dockerfile.py
 
+      # One Python version, declared once. CI read .python-version while
+      # etl.yml and database.yml pinned an older one of their own, so the
+      # two workflows that write to the live database ran on an
+      # interpreter nothing tested.
+      - name: One Python version everywhere
+        run: python tools/check_python_version.py
+
       - name: Render blueprint is valid YAML
         run: |
           python - <<'PY'

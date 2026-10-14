@@ -48,6 +48,7 @@ import sys
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -74,6 +75,10 @@ while True:
         break
     except OverflowError:
         _limit //= 2
+class ExportUnreadable(Exception):
+    """The export itself is broken, as opposed to the database."""
+
+
 RAW_BASE = ("https://raw.githubusercontent.com/"
             "Bikineh-Projekts/market_pipeline-Aktiv/data-export")
 
@@ -194,7 +199,21 @@ class Source:
             ) from exc
 
     def rows(self, name: str) -> tuple[list[str], list[list[str]]]:
-        data = gzip.decompress(self._raw(name)).decode("utf-8")
+        try:
+            data = gzip.decompress(self._raw(name)).decode("utf-8")
+        except (OSError, EOFError, zlib.error) as exc:
+            # A half-downloaded or half-written .gz. Raised as a stack trace
+            # by default, which says "EOFError: Compressed file ended before
+            # the end-of-stream marker" and names no file at all.
+            raise ExportUnreadable(
+                f"csv/{name}.csv.gz is corrupt or incomplete ({exc}). "
+                f"Re-download the export, or pass --from with a good copy."
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise ExportUnreadable(
+                f"csv/{name}.csv.gz is not UTF-8 text ({exc})."
+            ) from exc
+
         reader = csv.reader(io.StringIO(data))
         header = next(reader, None)
         if not header:
@@ -287,17 +306,20 @@ def sync_dimensions(cur, src: Source) -> dict[str, dict[str, int]]:
     return maps
 
 
-def load_fact(cur, src: Source, spec, maps) -> tuple[int, int]:
-    """Returns (rows in the file, rows actually inserted)."""
+def load_fact(cur, src: Source, spec, maps):
+    """(rows in file, rows inserted, rows dropped per dimension, columns absent)."""
     table, columns, fks, conflict = spec
     header, rows = src.rows(table)
     if not rows:
-        return 0, 0
+        return 0, 0, {}, []
+
+    missing_cols = sorted(set(columns) - set(header))
 
     payload = []
+    orphans: dict[str, int] = {}
     for row in rows:
         values = blank_to_none(row, header, columns)
-        broken = False
+        broken = None
         for col, dim in fks.items():
             i = columns.index(col)
             raw = values[i]
@@ -305,14 +327,16 @@ def load_fact(cur, src: Source, spec, maps) -> tuple[int, int]:
                 continue              # symbol_id is nullable on log_api_call
             mapped = maps[dim].get(str(raw))
             if mapped is None:
-                broken = True         # a fact whose dimension row is missing
+                broken = dim          # its dimension row is not in the export
                 break
             values[i] = mapped
-        if not broken:
+        if broken:
+            orphans[broken] = orphans.get(broken, 0) + 1
+        else:
             payload.append(values)
 
     if not payload:
-        return len(rows), 0
+        return len(rows), 0, orphans, missing_cols
 
     cols = ", ".join(columns)
     before = count(cur, table)
@@ -350,7 +374,7 @@ def load_fact(cur, src: Source, spec, maps) -> tuple[int, int]:
         """)
         cur.execute("DROP TABLE _incoming")
 
-    return len(rows), count(cur, table) - before
+    return len(rows), count(cur, table) - before, orphans, missing_cols
 
 
 def count(cur, table: str) -> int:
@@ -404,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         src = Source(args.source)
-    except Exception as exc:
+    except (OSError, zipfile.BadZipFile, ValueError) as exc:
         print(f"\n  Cannot open the export: {exc}\n", file=sys.stderr)
         return 1
     print(f"  from   {src.label()}")
@@ -437,12 +461,37 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {table:<26} {len(maps[table]):>6} mapped")
 
             total_new = 0
+            warnings: list[str] = []
             for spec in FACTS:
-                read, new = load_fact(cur, src, spec, maps)
+                read, new, orphans, absent = load_fact(cur, src, spec, maps)
                 total_new += new
-                flag = "" if new else "   (nothing new)"
+                dropped = sum(orphans.values())
+
+                if dropped:
+                    # Never let this pass as "nothing new". A fact whose
+                    # dimension row is not in the export cannot be written
+                    # without inventing a company, so it is skipped -- but
+                    # skipped data that announces itself as "up to date" is
+                    # how a report ends up quietly missing a third of its
+                    # rows.
+                    note = f"   {dropped} SKIPPED"
+                elif new:
+                    note = ""
+                else:
+                    note = "   (nothing new)"
                 print(f"  {spec[0]:<26} {read:>6} in file  "
-                      f"{new:>6} added{flag}")
+                      f"{new:>6} added{note}")
+
+                for dim, n in sorted(orphans.items()):
+                    warnings.append(
+                        f"{spec[0]}: {n} row(s) skipped — their {dim} row is "
+                        f"not in the export. The export is incomplete; "
+                        f"re-run it and import again.")
+                if absent:
+                    warnings.append(
+                        f"{spec[0]}: {', '.join(absent)} not in the file, "
+                        f"stored as NULL. If the export format changed, "
+                        f"those columns are now empty here.")
 
             fix_sequences(cur)
 
@@ -452,7 +501,15 @@ def main(argv: list[str] | None = None) -> int:
                       f"Nothing was written.\n")
                 return 0
 
+        if warnings:
+            print()
+            for w in warnings:
+                print(f"  WARNING  {w}")
         print(f"\n  {total_new} row(s) added.\n")
+    except ExportUnreadable as exc:
+        print(f"\n  The export could not be read, and nothing was written:\n"
+              f"    {exc}\n", file=sys.stderr)
+        return 1
     except psycopg2.Error as exc:
         print(f"\n  The import failed and nothing was written:\n"
               f"    {str(exc).strip()}\n", file=sys.stderr)
