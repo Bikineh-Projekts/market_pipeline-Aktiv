@@ -49,6 +49,8 @@ import psycopg2
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from tools import pgconnect  # noqa: E402
+
 SCHEMA_FILES = ("sql/01_schema.sql", "sql/02_bi_views.sql")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 
@@ -79,25 +81,35 @@ def explain_connection_error(exc: Exception, url: str, label: str) -> list[str]:
 
     These four cover essentially every first-run failure, and each one has
     a different fix -- which is the whole point of separating them.
+
+    Matched in German as well as English. A German PostgreSQL says
+    "Datenbank »x« existiert nicht", and matching only the English would
+    drop every one of these cases through to the generic branch on exactly
+    the machine that needs them most.
     """
     text = str(exc).lower()
     where = describe(url)
 
-    if "does not exist" in text and "database" in text:
+    if ("does not exist" in text and "database" in text) \
+            or ("existiert nicht" in text and "datenbank" in text):
         name = psycopg2.extensions.parse_dsn(url).get("dbname", "marketdb")
         return [
             f'the {label} database "{name}" does not exist yet.',
             "Create it first -- in pgAdmin: right-click Databases -> Create",
             f'-> Database, name it "{name}". Then run this again.',
         ]
-    if "password authentication failed" in text or "no password supplied" in text:
+    if ("password authentication failed" in text
+            or "no password supplied" in text
+            or "passwort-authentifizierung" in text
+            or "kein passwort" in text):
         return [
             f"{where} refused the password.",
             "The password belongs in the connection string, between the user",
             "name and the @:  postgresql://postgres:PASSWORD@localhost:5432/marketdb",
             "If it contains @ : / or #, percent-encode those characters.",
         ]
-    if "could not connect" in text or "connection refused" in text or "timeout" in text:
+    if ("could not connect" in text or "connection refused" in text
+            or "timeout" in text or "verbindung" in text):
         return [
             f"nothing is listening at {where}.",
             "For a local database: check the PostgreSQL service is running",
@@ -110,9 +122,9 @@ def explain_connection_error(exc: Exception, url: str, label: str) -> list[str]:
 
 
 def connect(url: str, label: str):
-    conn = psycopg2.connect(url, connect_timeout=15)
-    conn.autocommit = True
-    return conn
+    # Through pgconnect, so a German or French PostgreSQL reports a bad
+    # password as a bad password rather than as a UnicodeDecodeError.
+    return pgconnect.connect(url, autocommit=True)
 
 
 def apply_schema(conn) -> None:
