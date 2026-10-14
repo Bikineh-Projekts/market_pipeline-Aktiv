@@ -60,8 +60,17 @@ import psycopg2.extras
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 try:
     ZONE: timezone | ZoneInfo = ZoneInfo(APP_TIMEZONE)
+    ZONE_LABEL = APP_TIMEZONE
 except Exception:
-    ZONE = timezone.utc
+    # Windows ships no IANA database, so this is the normal path there
+    # unless `tzdata` is installed. Falling back to UTC *while still
+    # printing "Europe/Berlin"* puts a two-hour error under the right
+    # label, which is worse than an honest one. The system's own zone is
+    # the better guess, and the label says what was actually used.
+    _now = datetime.now().astimezone()
+    ZONE = _now.tzinfo or timezone.utc
+    ZONE_LABEL = (f"{_now.tzname() or 'local time'} (system clock; "
+                  f"pip install tzdata for {APP_TIMEZONE})")
 
 # A worksheet cannot hold more than this. Not a tunable.
 EXCEL_MAX_ROWS = 1_048_576

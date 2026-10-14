@@ -72,8 +72,17 @@ APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 
 try:
     ZONE: timezone | ZoneInfo = ZoneInfo(APP_TIMEZONE)
+    ZONE_LABEL = APP_TIMEZONE
 except Exception:
-    ZONE = timezone.utc
+    # Windows ships no IANA database, so this is the normal path there
+    # unless `tzdata` is installed. Falling back to UTC *while still
+    # printing "Europe/Berlin"* puts a two-hour error under the right
+    # label, which is worse than an honest one. The system's own zone is
+    # the better guess, and the label says what was actually used.
+    _now = datetime.now().astimezone()
+    ZONE = _now.tzinfo or timezone.utc
+    ZONE_LABEL = (f"{_now.tzname() or 'local time'} (system clock; "
+                  f"pip install tzdata for {APP_TIMEZONE})")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -659,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
     label = _label(args.source)
     log.info("source  %s", label)
     log.info("target  %s", _label(args.target))
-    log.info("clock   %s (%s)", APP_TIMEZONE,
+    log.info("clock   %s (%s)", ZONE_LABEL,
              datetime.now(ZONE).strftime("%Y-%m-%d %H:%M:%S %Z"))
     if args.dry_run:
         log.info("dry run: nothing will be written")
