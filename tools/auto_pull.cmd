@@ -15,7 +15,18 @@ setlocal
 rem --- YOUR database ----------------------------------------------------
 rem If the password contains @ : / or # it must be percent-encoded:
 rem   @ is %%40   : is %%3A   / is %%2F   # is %%23
-set TARGET=postgresql://postgres:PASSWORD@localhost:5432/marketdb
+rem
+rem TWO CHARACTERS BATCH ITSELF EATS, whatever the URL rules say:
+rem
+rem   %  must be written twice.  A percent-encoded password like
+rem      p%%40ss arrives as p@ss only if you type p%%%%40ss here --
+rem      cmd consumes one %% of every pair before the URL is ever seen.
+rem
+rem   &  ends a command.  It is why every SET below is written
+rem      set "NAME=value" with the quotes around the WHOLE assignment:
+rem      unquoted, a connection string ending ?sslmode=require&channel...
+rem      would set NAME, then try to run `channel...` as a program.
+set "TARGET=postgresql://postgres:PASSWORD@localhost:5432/marketdb"
 
 rem --- The RENDER database, if you want the two connected DIRECTLY -------
 rem Render dashboard -> your Postgres -> Connections -> EXTERNAL Database
@@ -27,15 +38,15 @@ rem Leave it EMPTY and the task falls back to the published export, which
 rem needs no Render credentials and keeps working after Render deletes the
 rem database at 30 days. Both end up with the same rows; the direct one is
 rem fresher, because it does not wait for an export to be built.
-set SOURCE=
+set "SOURCE="
 
 rem ----------------------------------------------------------------------
 rem Everything is relative to this file, so the task works no matter what
 rem directory Windows starts it in -- which is not the one you are in now.
-set HERE=%~dp0
-set LOGFILE=%HERE%auto_pull.log
+set "HERE=%~dp0"
+set "LOGFILE=%HERE%auto_pull.log"
 
-echo %TARGET% | findstr /C:":PASSWORD@" >nul
+echo "%TARGET%" | findstr /C:":PASSWORD@" >nul
 if not errorlevel 1 (
     echo.
     echo   Open this file in Notepad and set TARGET at the top first.
@@ -77,7 +88,7 @@ rem The window is deliberate. The free plan allows 750 instance-hours a
 rem month; awake around the clock is about 744 of them -- the whole
 rem allowance, for a page nobody reads at 04:00. 08:00-22:59 is about 465.
 rem Clear DASHBOARD to turn the ping off.
-set DASHBOARD=https://market-pipeline-aktiv.onrender.com
+set "DASHBOARD=https://market-pipeline-aktiv.onrender.com"
 
 rem Computed OUTSIDE any parenthesised block on purpose. cmd expands
 rem %VAR% when it PARSES a block, not when it runs it, so setting HOUR and
