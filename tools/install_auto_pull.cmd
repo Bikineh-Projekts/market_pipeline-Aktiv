@@ -3,8 +3,12 @@ rem =====================================================================
 rem  Make the pull automatic. Double-click once; Windows does the rest.
 rem
 rem  This registers a Windows scheduled task that runs auto_pull.cmd every
-rem  N minutes. Nothing to install -- Task Scheduler is part of Windows and
-rem  psql comes with PostgreSQL.
+rem  N minutes. Nothing to install: Task Scheduler is part of Windows, and
+rem  the script installs psycopg2 and tzdata itself if they are missing.
+rem
+rem  It imports from the export GitHub publishes, through
+rem  tools\import_export.py. Only rows your database does not already
+rem  have, so a run with nothing new costs a second.
 rem
 rem  WHY NOT LOGICAL REPLICATION, WHICH WOULD BE AUTOMATIC BY ITSELF
 rem  Because Render will not do it on this plan. Render's own docs: logical
@@ -23,9 +27,10 @@ rem =====================================================================
 setlocal
 
 rem --- how often, in minutes --------------------------------------------
-rem The ETL behind this writes new rows every 30 minutes at best, and the
-rem free API quota caps it there, so anything under about 10 minutes is
-rem just asking the same question more often than the answer can change.
+rem The export is rebuilt when the ETL finishes, every 30 minutes at
+rem best, and the free API quota caps it there -- so anything under
+rem about 10 minutes asks the same question more often than the answer
+rem can possibly change.
 set EVERY_MINUTES=15
 
 set TASKNAME=MarketPipeline Pull
@@ -38,10 +43,14 @@ if not exist "%SCRIPT%" (
     exit /b 1
 )
 
-findstr /C:":PASSWORD@" "%SCRIPT%" >nul
+rem Anchored to the `set TARGET=` line, not scanned across the whole file:
+rem auto_pull.cmd contains the string ":PASSWORD@" in its own guard, so a
+rem plain search always matched and this refused to schedule anything no
+rem matter how correctly TARGET had been filled in.
+findstr /B /C:"set TARGET=postgresql://postgres:PASSWORD@" "%SCRIPT%" >nul
 if not errorlevel 1 (
     echo.
-    echo   Open auto_pull.cmd in Notepad first and set LOCAL_DB —
+    echo   Open auto_pull.cmd in Notepad first and set TARGET -
     echo   it still contains the word PASSWORD.
     echo.
     pause
@@ -84,7 +93,7 @@ echo     check in SQL:   SELECT * FROM render_sync_status;
 echo     stop it:        schtasks /Delete /TN "%TASKNAME%" /F
 echo.
 echo   One caveat worth knowing: this runs while you are logged in. It
-echo   does not run when the computer is off, and it does not need to —
+echo   does not run when the computer is off, and it does not need to -
 echo   the pull only ever copies what it has not seen, so a machine that
 echo   was off for a week catches up on the next run.
 echo.
