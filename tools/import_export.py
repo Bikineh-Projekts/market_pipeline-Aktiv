@@ -58,6 +58,8 @@ import psycopg2.extras
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from tools import pgconnect  # noqa: E402
+
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 
 # csv refuses a field over 131072 bytes by default, and raw_profile and
@@ -438,10 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  built  {info['exported_at'].get('local', '?')} Berlin")
 
     try:
-        conn = psycopg2.connect(args.target, connect_timeout=15)
-    except psycopg2.Error as exc:
-        print(f"\n  Cannot reach your database.\n    {str(exc).strip()}\n",
-              file=sys.stderr)
+        conn = pgconnect.connect(args.target)
+    except pgconnect.ConnectionFailed as exc:
+        print(f"\n  Cannot reach your database.\n    {exc}\n", file=sys.stderr)
         return 1
 
     host = psycopg2.extensions.parse_dsn(args.target)
