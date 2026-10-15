@@ -573,13 +573,8 @@ def one_pass(source_url: str, target_url: str, *, batch: int, dry_run: bool,
 
 
 def _label(url: str) -> str:
-    """A host to record in replication_state, with no credential in it."""
-    from urllib.parse import urlsplit
-    try:
-        parts = urlsplit(url)
-        return f"{parts.hostname or '?'}{parts.path}"
-    except ValueError:
-        return "?"
+    """host/dbname for the log and for replication_state. See pgconnect."""
+    return pgconnect.safe_label(url)
 
 
 # ---------------------------------------------------------------------
@@ -671,6 +666,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.source == args.target:
         ap.error("--source and --target are the same database.")
+
+    # Before connecting, not after. libpq's report of a connection string
+    # that contains itself is a complaint about a port nobody typed, and
+    # it names neither the file nor the fix. See complain_about_url.
+    for which, url in (("--source", args.source), ("--target", args.target)):
+        wrong = pgconnect.complain_about_url(url)
+        if wrong:
+            log.error("%s is not usable: %s", which, wrong)
+            return 2
 
     label = _label(args.source)
     log.info("source  %s", label)
