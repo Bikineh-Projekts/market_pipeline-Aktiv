@@ -63,11 +63,35 @@ rem directory Windows starts it in -- which is not the one you are in now.
 set "HERE=%~dp0"
 set "LOGFILE=%HERE%auto_pull.log"
 
-echo "%TARGET%" | findstr /C:":PASSWORD@" >nul
-if not errorlevel 1 (
+rem Pure string substitution, no pipe and no errorlevel. The previous
+rem version was `echo "%TARGET%" | findstr ... ` and read the errorlevel
+rem afterwards -- which a failed `call secrets.cmd` a few lines above can
+rem leave set, so the guard fired on a TARGET that was perfectly correct
+rem and sent the user to edit a line that needed no editing.
+rem
+rem If removing the text changes the string, the string contained it.
+if not "%TARGET%"=="%TARGET:PASSWORD@=%" (
     echo.
-    echo   Open this file in Notepad and set TARGET at the top first.
-    echo   It still says PASSWORD.
+    echo   TARGET at the top of this file still says PASSWORD.
+    echo   Open tools\auto_pull.cmd in Notepad and put your real local
+    echo   password in it.
+    echo.
+    pause
+    exit /b 1
+)
+
+rem secrets.cmd is the usual way this goes wrong: pasting the bare URL
+rem instead of the whole `set "SOURCE=..."` line makes cmd try to RUN the
+rem URL, which reads as 'postgresql:' is not recognized -- a message that
+rem names neither the file nor what to do about it.
+if defined SOURCE if not "%SOURCE:~0,11%"=="postgresql:" if not "%SOURCE:~0,9%"=="postgres:" (
+    echo.
+    echo   SOURCE does not look like a connection string:
+    echo     %SOURCE%
+    echo.
+    echo   tools\secrets.cmd must contain the WHOLE line, set and quotes:
+    echo     set "SOURCE=postgresql://user:password@host/dbname"
+    echo   not just the URL on its own.
     echo.
     pause
     exit /b 1
