@@ -276,3 +276,86 @@ def test_the_starred_summary_hides_the_password():
     line = starred("market_db_aktiv_user", HOST, "5432", "market_db_aktiv")
     assert SECRET not in line
     assert "********" in line
+
+
+# --------------------------------------------------------------------------
+# tidy(): what actually arrives from a console prompt and a clipboard.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected_length", [
+    ("\x16\x16", 0),            # Ctrl+V inserts control chars, it does not paste
+    ("\x16", 0),
+    ("\x00\x1b", 0),
+    ("", 0),
+    ("   ", 0),
+    ("\n\n", 0),
+])
+def test_control_characters_are_not_mistaken_for_a_password(raw, expected_length):
+    """
+    A prompt once reported "got 2 characters" for a password of 32,
+    because Ctrl+V in a console inserts the literal control character
+    instead of pasting. Two bytes of junk then looked like success.
+    """
+    from tools.set_secrets import tidy
+
+    assert len(tidy(raw)) == expected_length
+
+
+@pytest.mark.parametrize("wrapper", [
+    "{url}", "{url}\n", "  {url}  ", "\n\n{url}", '"{url}"', "'{url}'",
+    "psql {url}", "psql '{url}'", "{url}\r\n",
+])
+def test_a_copied_url_survives_however_it_was_copied(wrapper):
+    """Render offers the connection as a psql command as well as a URL."""
+    from tools.set_secrets import tidy
+
+    url = f"postgresql://u:{SECRET}@{HOST}/market_db_aktiv"
+    assert tidy(wrapper.format(url=url)) == url
+
+
+def test_the_whole_run_writes_a_usable_file(tmp_path, monkeypatch):
+    """
+    End to end with the console stubbed out, because the person running
+    this cannot debug a traceback and every round trip costs them an hour.
+    """
+    from tools import set_secrets
+
+    secrets = tmp_path / "secrets.cmd"
+    monkeypatch.setattr(set_secrets, "SECRETS", secrets)
+    monkeypatch.setattr(set_secrets, "check", lambda url, what: True)
+    monkeypatch.setattr(
+        set_secrets, "clipboard",
+        lambda: f"postgresql://market_db_aktiv_user:{SECRET}@{HOST}/market_db_aktiv",
+    )
+
+    answers = iter(["", "", "", ""])          # Enter at the URL prompt, then defaults
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(set_secrets.getpass, "getpass", lambda *a: "Admin")
+
+    assert set_secrets.main() == 0
+
+    written = secrets.read_text()
+    assert f'set "SOURCE=postgresql://market_db_aktiv_user:{SECRET}@{HOST}:5432/market_db_aktiv"' in written
+    assert 'set "TARGET=postgresql://postgres:Admin@localhost:5432/marketdb"' in written
+    # Each line must be the whole `set "NAME=..."`, quotes included: pasting
+    # a bare URL is what made cmd try to run it.
+    for line in written.splitlines():
+        if line.startswith("set "):
+            assert line.startswith('set "') and line.endswith('"')
+
+
+def test_the_run_doubles_a_percent_on_the_way_into_the_file(tmp_path, monkeypatch):
+    from tools import set_secrets
+
+    secrets = tmp_path / "secrets.cmd"
+    monkeypatch.setattr(set_secrets, "SECRETS", secrets)
+    monkeypatch.setattr(set_secrets, "check", lambda url, what: True)
+    monkeypatch.setattr(set_secrets, "clipboard", lambda: "")
+
+    answers = iter(["skip", "", "", ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr(set_secrets.getpass, "getpass", lambda *a: "pa%ss")
+
+    assert set_secrets.main() == 0
+    assert 'set "TARGET=postgresql://postgres:pa%%ss@localhost:5432/marketdb"' \
+        in secrets.read_text()
