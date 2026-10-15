@@ -156,6 +156,52 @@ def complain_about_url(url: str) -> str | None:
     return None
 
 
+class UrlUnusable(Exception):
+    """A connection string that cannot be taken apart, with the reason."""
+
+
+def split_url(url: str) -> dict[str, str]:
+    """
+    user / password / host / port / dbname / query out of a connection URL.
+
+    This lives here, beside safe_label, because this module is the only
+    place allowed to parse a connection string -- a rule a test enforces.
+    Four private copies of a URL-parsing helper is how the password got
+    into a log file, and an exception list would have let a fifth back in.
+
+    complain_about_url runs first, so the nested string that broke this
+    three times is refused with an explanation instead of being parsed
+    into nonsense.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    wrong = complain_about_url(url)
+    if wrong:
+        raise UrlUnusable(wrong)
+
+    parts = urlsplit(url.strip())
+    if not parts.hostname:
+        raise UrlUnusable("that URL has no host in it.")
+    try:
+        port = parts.port
+    except ValueError:
+        raise UrlUnusable(
+            "that URL has something other than a number where the port goes."
+        ) from None
+
+    return {
+        "user": unquote(parts.username or ""),
+        "password": unquote(parts.password or ""),
+        "host": parts.hostname,
+        "port": str(port or 5432),
+        "dbname": parts.path.lstrip("/"),
+        # Render's dashboard sometimes hands the URL out with
+        # ?sslmode=require on the end. Rebuilding without it would quietly
+        # drop a requirement the server may enforce, so it is carried.
+        "query": parts.query,
+    }
+
+
 class ConnectionFailed(Exception):
     """A connection error whose message survived a non-UTF-8 server."""
 
