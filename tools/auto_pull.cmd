@@ -16,7 +16,13 @@ rem --- WHERE THE CONNECTION STRINGS COME FROM ---------------------------
 rem Both of them live in tools\secrets.cmd, which .gitignore excludes.
 rem NOTHING IN THIS FILE NEEDS EDITING, EVER. Re-download it any time.
 rem
-rem secrets.cmd is two lines:
+rem DO NOT WRITE secrets.cmd BY HAND. Run tools\set_secrets.cmd: it asks
+rem for the passwords at a masked prompt and writes the file itself. Every
+rem failure this setup has had came from editing it by hand -- a whole URL
+rem pasted in where only the password went, a placeholder replaced in two
+rem places at once, the bare URL without the `set "..."` around it.
+rem
+rem For reference, it is two lines:
 rem
 rem   set "TARGET=postgresql://postgres:PASS@localhost:5432/marketdb"
 rem   set "SOURCE=postgresql://user:PASS@host.../market_db_aktiv"
@@ -45,10 +51,13 @@ if not defined TARGET (
     echo.
     echo   No database to write to.
     echo.
-    echo   Create tools\secrets.cmd with this line, your password in it:
-    echo     set "TARGET=postgresql://postgres:PASS@localhost:5432/marketdb"
+    echo   Run this, which writes it for you and asks for the password
+    echo   at a prompt that does not show what you type:
     echo.
-    echo   Add a SOURCE line too to copy straight from Render.
+    echo     tools\set_secrets.cmd
+    echo.
+    echo   Writing tools\secrets.cmd by hand is where every previous
+    echo   attempt went wrong, so there is no longer any need to.
     echo.
     pause
     exit /b 1
@@ -69,9 +78,10 @@ if defined SOURCE if not "%SOURCE:~0,11%"=="postgresql:" if not "%SOURCE:~0,9%"=
     echo   SOURCE does not look like a connection string:
     echo     %SOURCE%
     echo.
-    echo   tools\secrets.cmd must contain the WHOLE line, set and quotes:
-    echo     set "SOURCE=postgresql://user:password@host/dbname"
-    echo   not just the URL on its own.
+    echo   Rather than fixing it by hand, run this and type the password
+    echo   at the prompt -- it writes the file correctly:
+    echo.
+    echo     tools\set_secrets.cmd
     echo.
     pause
     exit /b 1
