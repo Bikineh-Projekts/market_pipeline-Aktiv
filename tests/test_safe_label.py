@@ -215,3 +215,64 @@ def test_the_complaint_never_quotes_the_string_it_rejects(url):
 def test_a_usable_connection_string_is_not_complained_about(url):
     """A check that rejects everything would pass every test above."""
     assert pgconnect.complain_about_url(url) is None
+
+
+# --------------------------------------------------------------------------
+# set_secrets: it handles the password, so it gets the same scrutiny.
+# --------------------------------------------------------------------------
+
+def test_the_render_url_is_split_into_its_parts():
+    from tools.set_secrets import split_url
+
+    bits = split_url(f"postgresql://market_db_aktiv_user:{SECRET}@{HOST}/market_db_aktiv")
+    assert bits["user"] == "market_db_aktiv_user"
+    assert bits["password"] == SECRET
+    assert bits["host"] == HOST
+    assert bits["dbname"] == "market_db_aktiv"
+    assert bits["port"] == "5432"
+
+
+def test_sslmode_survives_the_round_trip():
+    """Rebuilding without it would silently drop a server requirement."""
+    from tools.set_secrets import connection_string, split_url
+
+    url = f"postgresql://u:{SECRET}@{HOST}/market_db_aktiv?sslmode=require"
+    bits = split_url(url)
+    rebuilt = connection_string(bits["user"], bits["password"], bits["host"],
+                                bits["port"], bits["dbname"], bits["query"])
+    assert "sslmode=require" in rebuilt
+    assert "?" not in connection_string("u", "p", "h", "5432", "db", "")
+
+
+def test_a_percent_in_a_password_is_doubled_for_cmd():
+    """cmd eats '%' in pairs; the old batch version only warned about it."""
+    from tools.set_secrets import for_cmd
+
+    assert for_cmd("pa%ss") == "pa%%ss"
+    assert for_cmd("p%%q") == "p%%%%q"
+    assert for_cmd("ordinary") == "ordinary"
+
+
+def test_a_percent_encoded_password_is_decoded_once():
+    """postgresql://u:pa%40ss@h/db means the password is pa@ss."""
+    from tools.set_secrets import split_url
+
+    assert split_url("postgresql://u:pa%40ss@h/db")["password"] == "pa@ss"
+
+
+@pytest.mark.parametrize("url", LEAKY)
+def test_split_url_either_works_or_refuses_without_echoing(url):
+    from tools.set_secrets import UrlUnusable, split_url
+
+    try:
+        split_url(url)
+    except UrlUnusable as exc:
+        assert SECRET not in str(exc), f"LEAKED: {exc}"
+
+
+def test_the_starred_summary_hides_the_password():
+    from tools.set_secrets import starred
+
+    line = starred("market_db_aktiv_user", HOST, "5432", "market_db_aktiv")
+    assert SECRET not in line
+    assert "********" in line
