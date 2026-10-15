@@ -12,73 +12,53 @@ rem =====================================================================
 
 setlocal
 
-rem --- YOUR database ----------------------------------------------------
-rem If the password contains @ : / or # it must be percent-encoded:
-rem   @ is %%40   : is %%3A   / is %%2F   # is %%23
+rem --- WHERE THE CONNECTION STRINGS COME FROM ---------------------------
+rem Both of them live in tools\secrets.cmd, which .gitignore excludes.
+rem NOTHING IN THIS FILE NEEDS EDITING, EVER. Re-download it any time.
 rem
-rem TWO CHARACTERS BATCH ITSELF EATS, whatever the URL rules say:
+rem secrets.cmd is two lines:
 rem
-rem   %  must be written twice.  A percent-encoded password like
-rem      p%%40ss arrives as p@ss only if you type p%%%%40ss here --
-rem      cmd consumes one %% of every pair before the URL is ever seen.
+rem   set "TARGET=postgresql://postgres:PASS@localhost:5432/marketdb"
+rem   set "SOURCE=postgresql://user:PASS@host.../market_db_aktiv"
 rem
-rem   &  ends a command.  It is why every SET below is written
-rem      set "NAME=value" with the quotes around the WHOLE assignment:
-rem      unquoted, a connection string ending ?sslmode=require&channel...
-rem      would set NAME, then try to run `channel...` as a program.
-set "TARGET=postgresql://postgres:PASSWORD@localhost:5432/marketdb"
+rem TARGET is your own database and is required.
+rem SOURCE is Render. Leave the line out entirely and the task falls back
+rem to the published export, which needs no Render credentials and keeps
+rem working after Render deletes the database at 30 days.
+rem
+rem Two characters batch eats, whatever the URL rules say:
+rem   %  write it twice. A password p%%40ss must be typed p%%%%40ss.
+rem   &  ends a command, which is why both lines are set "NAME=value"
+rem      with quotes around the WHOLE assignment.
+rem
+rem This file deliberately contains no placeholder password. The previous
+rem version did, in two places -- the TARGET line and the guard that
+rem checked it -- and a search-and-replace meant for the first silently
+rem rewrote the second, so the guard compared TARGET against itself with
+rem the real password removed and failed every run on a correct value.
 
-rem --- The RENDER database, if you want the two connected DIRECTLY -------
-rem Render dashboard -> your Postgres -> Connections -> EXTERNAL Database
-rem URL. Paste it here and this task copies Render straight into your
-rem database, with no file and no GitHub in between -- which is what you
-rem actually asked for.
-rem
-rem Leave it EMPTY and the task falls back to the published export, which
-rem needs no Render credentials and keeps working after Render deletes the
-rem database at 30 days. Both end up with the same rows; the direct one is
-rem fresher, because it does not wait for an export to be built.
-rem
-rem *** DO NOT PUT THE RENDER URL ON THE LINE BELOW. ***
-rem This file is tracked by git. A password typed here is a password
-rem published the moment you commit -- and this repository is public, so
-rem "I will delete it later" does not help: it stays in the history and
-rem has to be rotated at Render instead.
-rem
-rem Put it in tools\secrets.cmd, which .gitignore excludes and which this
-rem reads a few lines down. One line, no quotes needed around the whole
-rem assignment because the file is not parsed as a command line:
-rem
-rem     set "SOURCE=postgresql://user:password@host.../market_db_aktiv"
-rem
+set "TARGET="
 set "SOURCE="
-
-rem Untracked, so the credential never reaches git. Missing is fine: the
-rem task falls back to the published export.
 if exist "%~dp0secrets.cmd" call "%~dp0secrets.cmd"
+
+if not defined TARGET (
+    echo.
+    echo   No database to write to.
+    echo.
+    echo   Create tools\secrets.cmd with this line, your password in it:
+    echo     set "TARGET=postgresql://postgres:PASS@localhost:5432/marketdb"
+    echo.
+    echo   Add a SOURCE line too to copy straight from Render.
+    echo.
+    pause
+    exit /b 1
+)
 
 rem ----------------------------------------------------------------------
 rem Everything is relative to this file, so the task works no matter what
 rem directory Windows starts it in -- which is not the one you are in now.
 set "HERE=%~dp0"
 set "LOGFILE=%HERE%auto_pull.log"
-
-rem Pure string substitution, no pipe and no errorlevel. The previous
-rem version was `echo "%TARGET%" | findstr ... ` and read the errorlevel
-rem afterwards -- which a failed `call secrets.cmd` a few lines above can
-rem leave set, so the guard fired on a TARGET that was perfectly correct
-rem and sent the user to edit a line that needed no editing.
-rem
-rem If removing the text changes the string, the string contained it.
-if not "%TARGET%"=="%TARGET:PASSWORD@=%" (
-    echo.
-    echo   TARGET at the top of this file still says PASSWORD.
-    echo   Open tools\auto_pull.cmd in Notepad and put your real local
-    echo   password in it.
-    echo.
-    pause
-    exit /b 1
-)
 
 rem secrets.cmd is the usual way this goes wrong: pasting the bare URL
 rem instead of the whole `set "SOURCE=..."` line makes cmd try to RUN the
