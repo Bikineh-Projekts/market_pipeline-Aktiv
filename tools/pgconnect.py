@@ -44,6 +44,118 @@ def decode_server_bytes(raw: bytes) -> str:
     return repr(raw)
 
 
+def safe_label(url: str) -> str:
+    """
+    host/dbname out of a connection string, with no credential in it. Ever.
+
+    This is the only function in the project allowed to turn a connection
+    string into something printable, because four separate copies of it
+    existed and all four were wrong in the same way.
+
+    Each one handed the whole URL to a parser -- urlsplit in two, libpq's
+    parse_dsn in two -- and both parsers divide at the FIRST '@'. On a
+    well-formed URL that is the right '@'. On a connection string that has
+    been nested inside itself, which a search-and-replace produces in one
+    keystroke, the first '@' sits in the middle of the password, so the
+    username came back as the hostname and everything after it, PASSWORD
+    INCLUDED, came back as the path or the dbname. The label was then
+    written to auto_pull.log, to replication_state.source_label, and -- in
+    export_data -- into a manifest.json that a workflow force-pushes to a
+    public branch of a public repository.
+
+    So the credential is cut off by hand, at the LAST '@', before any
+    parser is given the chance to interpret it. A label exists only to be
+    read by a human: being approximate costs nothing, and leaking cannot
+    be taken back.
+    """
+    from urllib.parse import urlsplit
+
+    text = url.strip()
+
+    # libpq's OTHER syntax, which psycopg2 accepts just as happily:
+    #     host=x port=5432 dbname=y user=u password=SECRET
+    # It contains no '://' and no '@', so the URL path below treated the
+    # whole thing as a hostname and handed back the password inside it.
+    # Here only two keys are ever read, so there is nothing else to emit.
+    if "://" not in text and "=" in text:
+        fields: dict[str, str] = {}
+        for token in text.split():
+            key, _, value = token.partition("=")
+            if key.strip() in ("host", "hostaddr", "dbname"):
+                fields[key.strip()] = value.strip().strip("'\"")
+        host = fields.get("host") or fields.get("hostaddr") or "?"
+        dbname = fields.get("dbname", "")
+        label = f"{host}/{dbname}" if dbname else host
+    else:
+        # rsplit, not split: a password may legitimately contain '@', and
+        # the separator that matters is the LAST one.
+        after_credentials = text.split("://", 1)[-1].rsplit("@", 1)[-1]
+        try:
+            parts = urlsplit("//" + after_credentials)
+            host, path, port = parts.hostname or "?", parts.path or "", parts.port
+        except ValueError:
+            return "?"
+        label = f"{host}{path}"
+        # The ':' of an explicit port is the only one that belongs here.
+        if port:
+            label = label.replace(f":{port}", "", 1)
+
+    # The backstop. Everything above builds the label out of named parts,
+    # so none of these characters can appear in a correct one -- if one
+    # does, some input found a path through that was not anticipated, and
+    # saying nothing is the right answer.
+    if any(c in label for c in "@=:'\" \t\n"):
+        return "?"
+    return label
+
+
+def complain_about_url(url: str) -> str | None:
+    """
+    The one-line reason a connection string is malformed, or None.
+
+    Checked BEFORE connecting, because libpq's own report of the commonest
+    mistake here is unusable. Paste a whole connection string in where only
+    the password belonged -- which is what a search-and-replace does if the
+    replacement is the URL instead of the password -- and libpq says
+
+        invalid integer value "postgresql:" for connection option "port"
+
+    It is talking about a port nobody typed, it does not mention the file
+    the string came from, and it gives no hint that the string now contains
+    itself. Three separate debugging rounds went into that message.
+
+    The returned text names the file and what to put in it. It never
+    contains the string it is complaining about: that string is mostly
+    password.
+    """
+    text = url.strip()
+    if not text:
+        return "the connection string is empty."
+
+    if text.count("://") > 1:
+        return (
+            "the connection string contains a second connection string inside it.\n"
+            "    This happens when a whole URL is pasted in where only the password\n"
+            "    belonged. tools\\secrets.cmd should hold ONE url per line:\n"
+            '      set "SOURCE=postgresql://USER:PASSWORD@HOST/DBNAME"\n'
+            "    with PASSWORD replaced by the password on its own -- not by a url."
+        )
+
+    if "://" not in text and "=" not in text:
+        return (
+            "that is not a connection string.\n"
+            "    It must start with postgresql:// -- and the line in\n"
+            '    tools\\secrets.cmd must be the whole `set "NAME=..."`, not the url alone.'
+        )
+
+    if "://" in text:
+        after_credentials = text.split("://", 1)[-1].rsplit("@", 1)[-1]
+        if not after_credentials or after_credentials.startswith("/"):
+            return "the connection string has no host in it."
+
+    return None
+
+
 class ConnectionFailed(Exception):
     """A connection error whose message survived a non-UTF-8 server."""
 

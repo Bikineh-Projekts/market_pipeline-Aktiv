@@ -305,13 +305,14 @@ def write_manifest(out: pathlib.Path, url: str, table_counts: dict[str, int],
 
 
 def _host(url: str) -> str:
-    """The host, never the credential."""
-    from urllib.parse import urlsplit
-    try:
-        parts = urlsplit(url)
-        return f"{parts.hostname or '?'}{parts.path}"
-    except ValueError:
-        return "?"
+    """
+    The host, never the credential. This value is written into
+    manifest.json, which export.yml force-pushes to the PUBLIC data-export
+    branch, so it is the one label in the project that is published to the
+    world. See pgconnect.safe_label for what the old version did instead.
+    """
+    from tools import pgconnect
+    return pgconnect.safe_label(url)
 
 
 README = r"""# Data export

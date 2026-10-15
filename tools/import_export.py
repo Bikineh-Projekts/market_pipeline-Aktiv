@@ -464,14 +464,18 @@ def main(argv: list[str] | None = None) -> int:
     if info.get("exported_at"):
         print(f"  built  {info['exported_at'].get('local', '?')} Berlin")
 
+    wrong = pgconnect.complain_about_url(args.target)
+    if wrong:
+        print(f"\n  --target is not usable: {wrong}\n", file=sys.stderr)
+        return 2
+
     try:
         conn = pgconnect.connect(args.target)
     except pgconnect.ConnectionFailed as exc:
         print(f"\n  Cannot reach your database.\n    {exc}\n", file=sys.stderr)
         return 1
 
-    host = psycopg2.extensions.parse_dsn(args.target)
-    print(f"  into   {host.get('host', 'localhost')}/{host.get('dbname', '?')}\n")
+    print(f"  into   {pgconnect.safe_label(args.target)}\n")
 
     try:
         with conn, conn.cursor() as cur:

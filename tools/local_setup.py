@@ -66,12 +66,8 @@ def fail(headline: str, *lines: str) -> int:
 
 
 def describe(url: str) -> str:
-    """host/database, never the password."""
-    try:
-        parts = psycopg2.extensions.parse_dsn(url)
-        return f"{parts.get('host', 'localhost')}/{parts.get('dbname', '?')}"
-    except Exception:
-        return "<unparseable connection string>"
+    """host/database, never the password. See pgconnect.safe_label."""
+    return pgconnect.safe_label(url)
 
 
 def explain_connection_error(exc: Exception, url: str, label: str) -> list[str]:
@@ -91,7 +87,10 @@ def explain_connection_error(exc: Exception, url: str, label: str) -> list[str]:
 
     if ("does not exist" in text and "database" in text) \
             or ("existiert nicht" in text and "datenbank" in text):
-        name = psycopg2.extensions.parse_dsn(url).get("dbname", "marketdb")
+        # Through safe_label, not parse_dsn: on a connection string nested
+        # inside itself parse_dsn returns the whole remainder -- password
+        # and all -- as the dbname, and this prints it twice.
+        name = pgconnect.safe_label(url).rsplit("/", 1)[-1] or "marketdb"
         return [
             f'the {label} database "{name}" does not exist yet.',
             "Create it first -- in pgAdmin: right-click Databases -> Create",
