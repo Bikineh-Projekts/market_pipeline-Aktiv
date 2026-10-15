@@ -43,19 +43,10 @@ if not exist "%SCRIPT%" (
     exit /b 1
 )
 
-rem Anchored to the `set TARGET=` line, not scanned across the whole file:
-rem auto_pull.cmd contains the string ":PASSWORD@" in its own guard, so a
-rem plain search always matched and this refused to schedule anything no
-rem matter how correctly TARGET had been filled in.
-findstr /B /C:"set TARGET=postgresql://postgres:PASSWORD@" "%SCRIPT%" >nul
-if not errorlevel 1 (
-    echo.
-    echo   Open auto_pull.cmd in Notepad first and set TARGET -
-    echo   it still contains the word PASSWORD.
-    echo.
-    pause
-    exit /b 1
-)
+rem No placeholder pre-check here. This runs auto_pull.cmd below and
+rem refuses to schedule anything if it exits non-zero, so auto_pull's
+rem own guard is the single authority -- a second copy of the same
+rem rule in a different dialect was only a second way to be wrong.
 
 echo.
 echo   Testing one pull before scheduling anything...
