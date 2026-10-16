@@ -57,6 +57,18 @@ from zoneinfo import ZoneInfo
 import psycopg2
 import psycopg2.extras
 
+# The workflow runs this as `python tools/export_data.py`, which puts
+# tools/ on sys.path and NOT the repository root -- so `from tools import
+# pgconnect` fails with ModuleNotFoundError. pytest imports this module as
+# tools.export_data, where the root IS on the path, so the tests passed
+# and every scheduled export failed. Hence both lines, at module level
+# where an import error shows up on --help instead of mid-export.
+REPO = pathlib.Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools import pgconnect  # noqa: E402
+
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Berlin")
 try:
     ZONE: timezone | ZoneInfo = ZoneInfo(APP_TIMEZONE)
@@ -311,7 +323,6 @@ def _host(url: str) -> str:
     branch, so it is the one label in the project that is published to the
     world. See pgconnect.safe_label for what the old version did instead.
     """
-    from tools import pgconnect
     return pgconnect.safe_label(url)
 
 
