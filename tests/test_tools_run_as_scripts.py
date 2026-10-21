@@ -51,6 +51,7 @@ SCRIPTS = [
     "tools/local_setup.py",
     "tools/replicate.py",
     "tools/set_secrets.py",
+    "tools/healthcheck.py",
 ]
 
 
@@ -151,3 +152,27 @@ def test_export_data_can_label_a_host_when_run_as_a_script():
     assert done.returncode == 0, done.stderr[-600:]
     assert done.stdout.strip() == "h.example.com/db"
     assert "SECRET" not in done.stdout
+
+
+def test_healthcheck_is_listed_as_a_script():
+    """It is run by a person, not a workflow, so nothing else would check it."""
+    assert "tools/healthcheck.py" in SCRIPTS
+
+
+def test_the_healthcheck_sql_exists_and_writes_nothing():
+    """
+    It is handed to someone to run against a database holding real data.
+    A SELECT-only script cannot damage anything; one stray UPDATE could.
+    The single CREATE TABLE IF NOT EXISTS is deliberate and explained in
+    the file -- replication_state is made by replicate.py, not the
+    schema, and SQL resolves every table name before running anything.
+    """
+    sql = (REPO / "sql" / "07_healthcheck.sql").read_text()
+    body = "\n".join(
+        line.split("--", 1)[0] for line in sql.splitlines()
+    ).upper()
+    for forbidden in ("UPDATE ", "DELETE ", "INSERT ", "DROP ", "ALTER ",
+                      "TRUNCATE", "GRANT ", "REVOKE "):
+        assert forbidden not in body, f"{forbidden.strip()} in a read-only check"
+    assert body.count("CREATE ") == 1
+    assert "CREATE TABLE IF NOT EXISTS REPLICATION_STATE" in body
