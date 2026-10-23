@@ -65,6 +65,31 @@ def _series_key(payload: dict, indicator: str) -> str | None:
     return next((k for k in payload if "Technical Analysis" in k and indicator in k), None)
 
 
+# Alpha Vantage says "daily"; Twelve Data says "1day". They mean the same
+# thing, and for a while the warehouse believed they did not: whatever
+# string was sent to the API was also written into dim_interval, so the
+# daily candles landed under "1day" and the daily indicators under
+# "daily" -- two rows in dim_interval, two different interval_ids, for
+# one interval.
+#
+# Nothing failed. bi_fact_price_daily had already been taught to accept
+# either code, which patched the symptom in one view and left the split
+# in the data. The cost showed up only on a join: price to indicator on
+# symbol + date returns every row, and the same join with interval_id
+# added returns ZERO, with no error -- an empty Power BI visual that
+# looks like "no data yet" rather than like a bug.
+#
+# So the API's vocabulary stops at the API. This maps a provider's word
+# for an interval to the one code the warehouse stores.
+CANONICAL_INTERVAL = {
+    "daily":   "1day",
+    "weekly":  "1week",
+    "monthly": "1month",
+    "1min": "1min", "5min": "5min", "15min": "15min",
+    "30min": "30min", "60min": "60min",
+}
+
+
 def collect_indicator(symbol: str, indicator: str, interval: str = "daily",
                       max_records: int | None = None, run_id: int | None = None) -> int:
     params, value_field = INDICATORS[indicator]
@@ -84,7 +109,11 @@ def collect_indicator(symbol: str, indicator: str, interval: str = "daily",
     sym_id = db.symbol_id(symbol)
     src_id = db.source_id(SOURCE)
     ind_id = db.indicator_id(indicator)
-    int_id = db.interval_id(interval)
+    # The provider's word goes to the provider; the canonical code goes
+    # into the dimension. An unknown interval is stored as-is rather than
+    # dropped -- a new interval appearing under its own name is visible,
+    # and silently filing it under the wrong one would not be.
+    int_id = db.interval_id(CANONICAL_INTERVAL.get(interval, interval))
 
     rows = []
     for dt_str, values in list(payload[key].items())[:max_records]:
