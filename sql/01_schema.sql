@@ -249,9 +249,26 @@ INSERT INTO dim_indicator (indicator_name, description, category) VALUES
     ('SMA',  'SMA (50)', 'trend')
 ON CONFLICT (indicator_name) DO NOTHING;
 
+-- One row per interval, under ONE code. 'daily' used to be seeded here
+-- beside '1day' because Alpha Vantage's API calls it that, and the
+-- collector wrote whatever string it had sent to the API straight into
+-- this table. The result was one interval living as two rows with two
+-- ids: the daily candles on '1day', the daily indicators on 'daily'.
+--
+-- Nothing ever failed, which is how it lasted. A join of price to
+-- indicator on symbol and date returns every row; the same join with
+-- interval_id added returns none, silently -- an empty Power BI visual
+-- that reads as "nothing collected yet".
+--
+-- The collector now maps its provider's word to the code below, so the
+-- API's vocabulary stops at the API. Removing the seed matters as much
+-- as that fix: this file is re-applied by the migrate action, and while
+-- the row was seeded here every migrate put the alias straight back.
+--
+-- sql/08_merge_duplicate_intervals.sql cleans up a database that still
+-- has the split.
 INSERT INTO dim_interval (interval_code, interval_type) VALUES
     ('1min','intraday'),
     ('5min','intraday'),
-    ('1day','daily'),
-    ('daily','daily')
+    ('1day','daily')
 ON CONFLICT (interval_code) DO NOTHING;
