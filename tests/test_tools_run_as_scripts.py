@@ -52,6 +52,7 @@ SCRIPTS = [
     "tools/replicate.py",
     "tools/set_secrets.py",
     "tools/healthcheck.py",
+    "tools/migrate_intervals.py",
 ]
 
 
