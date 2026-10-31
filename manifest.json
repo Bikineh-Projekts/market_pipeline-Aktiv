@@ -1,0 +1,77 @@
+{
+  "exported_at": {
+    "utc": "2026-10-31T12:32:41.210310+00:00",
+    "local": "2026-10-31 13:32:41"
+  },
+  "timezone": "Europe/Berlin",
+  "database_size": "14 MB",
+  "source": "dpg-db6rqu8n74is738po11g-a.frankfurt-postgres.render.com/market_db_aktiv",
+  "rows": {
+    "tables": {
+      "dim_source": 3,
+      "dim_interval": 3,
+      "dim_indicator": 4,
+      "dim_symbol": 3,
+      "fact_market_timeseries": 5006,
+      "fact_market_quote": 87,
+      "fact_market_indicator": 342,
+      "fact_company_fundamental": 45,
+      "fact_earnings_calendar": 10,
+      "log_pipeline_run": 48,
+      "log_api_call": 654
+    },
+    "views": {
+      "bi_dim_symbol": 3,
+      "bi_dim_date": 2191,
+      "bi_fact_price_daily": 3042,
+      "bi_fact_price_intraday": 1964,
+      "bi_fact_indicator_daily": 342,
+      "bi_fact_quote_latest": 3,
+      "bi_fact_quote_history": 87,
+      "bi_fact_fundamental_latest": 3,
+      "bi_fact_earnings": 10,
+      "bi_fact_pipeline_run": 48,
+      "bi_fact_api_call": 654,
+      "bi_pipeline_health": 1,
+      "bi_storage_usage": 11
+    }
+  },
+  "total_rows": 6205,
+  "data_span": {
+    "first_candle": {
+      "utc": "2022-10-17T00:00:00+00:00",
+      "local": "2022-10-17 02:00:00"
+    },
+    "last_candle": {
+      "utc": "2026-10-30T19:55:00+00:00",
+      "local": "2026-10-30 20:55:00"
+    }
+  },
+  "freshness": {
+    "last_quote": {
+      "utc": "2026-10-31T01:44:13.312585+00:00",
+      "local": "2026-10-31 02:44:13"
+    },
+    "last_run": {
+      "utc": "2026-10-31T01:42:43.605527+00:00",
+      "local": "2026-10-31 02:42:43"
+    }
+  },
+  "truncated_sheets": [],
+  "files": {
+    "xlsx": "market_data.xlsx",
+    "csv": [
+      "csv/dim_source.csv.gz",
+      "csv/dim_interval.csv.gz",
+      "csv/dim_indicator.csv.gz",
+      "csv/dim_symbol.csv.gz",
+      "csv/fact_market_timeseries.csv.gz",
+      "csv/fact_market_quote.csv.gz",
+      "csv/fact_market_indicator.csv.gz",
+      "csv/fact_company_fundamental.csv.gz",
+      "csv/fact_earnings_calendar.csv.gz",
+      "csv/log_pipeline_run.csv.gz",
+      "csv/log_api_call.csv.gz"
+    ]
+  }
+}
